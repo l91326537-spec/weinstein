@@ -200,7 +200,10 @@ def collect_signals(frames, start, min_score_floor=50, ver=1):
 
 
 # ---------------- 거래량·매수 시점 비교용 ----------------
-def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None):
+def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False):
+    """mode: 'intra'=장중 손절가 닿으면 매도(자동 매도) | 'close'=금요일 종가가 손절가 아래면 그 종가에 매도
+       dyn_ma: 손절가 대신 '금요일 종가가 30주선 아래면 매도' (s0는 수량 계산용 명목 손절)"""
+    ma_v = f["ma30"].values
     """j0주에 e로 매수(partial_first면 그 주 중간 매수). 초기 손절만 두고 4단계까지 보유. vol_check면 매수 주 거래량 확인"""
     o, lo, c, stg, vr = f["open"].values, f["low"].values, f["close"].values, f["stage"].values, f["vr"].values
     risk = e - s0
@@ -218,7 +221,15 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None):
             moved = True
             if c[j - 1] > e:                 # 매수 후 be주째 종가가 수익이면 손절선을 매수가로
                 s0 = max(s0, e)
-        if lo[j] <= s0:
+        if dyn_ma:
+            if c[j] < ma_v[j]:
+                px = c[j]
+                return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "30주선 아래 마감", s_orig)
+        elif mode == "close":
+            if c[j] < s0:
+                px = c[j]
+                return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절(종가)", s_orig)
+        elif lo[j] <= s0:
             px = min(s0, o[j])
             return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절" if s0 == s_orig else "본전 손절", s_orig)
         if stg[j] == 4 and j + 1 < len(f):
@@ -330,7 +341,7 @@ def e_pos(r):
 
 
 def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2",
-                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None):
+                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra"):
     """mh: 잔고점 돌파 dict(stop='pct'|'low3', bonus=점수 가점, k=최근 몇 주 고점)
        block_rebreak: 돌파 매수가 손절로 끝난 뒤 이 주 수 동안 같은 종목 돌파 재매수 안 함"""
     """rt_stop: 돌파선 되돌림 풀백의 손절을 '돌파선 -3%·3주 저점 -1% 중 낮은 쪽'으로
@@ -411,12 +422,15 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 kind = "MA" if -3 <= extv[i] <= 5 else "RT"          # 30주선 풀백 / 돌파선 되돌림
                 if kind == "RT" and rt_stop and not math.isnan(bl_[i]):
                     s0 = min(min(low3[i] * 0.99, bl_[i] * 0.97), e * (1 - BT["min_stop_pct"] / 100))
+                elif pb_stop in ("ma2", "ma3", "ma5", "maclose"):
+                    pctm = {"ma2": 0.98, "ma3": 0.97, "ma5": 0.95, "maclose": 0.97}[pb_stop]
+                    s0 = min(ma[i] * pctm, e * (1 - BT["min_stop_pct"] / 100))
                 else:
                     s0 = min(min(low3[i] * 0.99, ma[i] * 0.98), e * (1 - BT["min_stop_pct"] / 100))
                 s0 = widen(s0, e, i)
                 if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, i + 1, e, s0, False, None, be)
+                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose")
             elif g == "돌파" and entry_rule == "monday":
                 if vol_rule == "strict" and not (bvr[i] >= 2.0):
                     continue
@@ -475,7 +489,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(e * (1 - pct / 100), e, i)
                 if (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be, stop_mode)
                 last_entry = j
                 ent, ex, e, px, R, wk, why, s0 = tr
                 rows.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0,
@@ -689,7 +703,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>본전 손절 규칙 비교 (+ 아래 신호 표에 진입 비중·추매 결과)</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
+        P.append("<h2>풀백 손절 위치 · 장중 자동 매도 vs 금요일 종가 판단</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -788,7 +802,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("본전 손절 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("손절 위치·방식별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -807,19 +821,24 @@ def main(argv=None, fetch=None, universe=None):
     TP = "score2TPt"
     small_t = [t for t in frames if capmap.get(t) == "소형"]
     rk_small = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
-    sigs = {f"be{n}": CV(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13, be=n) for n in (1, 2, 4, 8)}
-    sigs["cur"] = CV(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13)
+    base_kw = dict(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13)
+    sigs = {k: CV(pb_stop=k, **base_kw) for k in ("ma2", "ma3", "ma5", "maclose")}
+    sigs["cur"] = CV(**base_kw)
+    sigs["close"] = CV(stop_mode="close", **base_kw)
+    sigs["close_ma3"] = CV(stop_mode="close", pb_stop="ma3", **base_kw)
     sigs[""] = sigs["cur"]
     sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (신호 분석용)
     bk = sigs["cur"]
     bk = bk[bk["kind"].isin(["B12", "B2"]) & (bk["score"] >= args.min_score)]
     es = entry_study(frames, bk)
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("지금 앱 점수", 6, q, "초기 손절만 두고 4단계까지 보유", "cur", None),
-        ("1주 뒤 수익이면 본전 손절", 6, q, "매수 후 1주째 종가가 매수가 위면 손절선을 매수가로 올림", "be1", None),
-        ("2주 뒤 수익이면 본전 손절", 6, q, "2주째 종가 기준", "be2", None),
-        ("4주 뒤 수익이면 본전 손절", 6, q, "4주째 종가 기준", "be4", None),
-        ("8주 뒤 수익이면 본전 손절", 6, q, "8주째 종가 기준", "be8", None),
+        ("지금 (풀백: 3주 저점·30주선 -2%, 장중 자동 매도)", 6, q, "풀백 손절 = 3주 저점 -1%와 30주선 -2% 중 낮은 쪽 · 손절가 닿으면 장중 자동 매도", "cur", None),
+        ("풀백 손절 30주선 -2%", 6, q, "풀백 손절을 30주선 -2%로만", "ma2", None),
+        ("풀백 손절 30주선 -3%", 6, q, "30주선 -3%", "ma3", None),
+        ("풀백 손절 30주선 -5%", 6, q, "30주선 -5%", "ma5", None),
+        ("풀백: 금요일 종가가 30주선 아래면 매도", 6, q, "고정 손절 없이, 주봉 종가가 그 주 30주선 아래로 마감하면 그 종가에 매도", "maclose", None),
+        ("모든 손절을 금요일 종가로 판단", 6, q, "돌파·풀백 모두: 장중에 손절가를 깨도 금요일 종가가 손절가 위면 보유, 아래면 종가에 매도", "close", None),
+        ("금요일 종가 판단 + 풀백 30주선 -3%", 6, q, "위 + 풀백 손절 30주선 -3%", "close_ma3", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:
