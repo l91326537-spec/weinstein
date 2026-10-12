@@ -427,6 +427,7 @@ def main(argv=None, fetch=None, universe=None):
             c = dfs[b]["Close"].reindex(cal, method="ffill")
             curves[b] = c / c.iloc[0] * 100
     rets = pd.concat([f["close"].reindex(cal, method="ffill").pct_change() for f in frames.values()], axis=1)
+    rets = rets.replace([np.inf, -np.inf], np.nan).where(rets.abs() < 1.0)   # 상장 전후·데이터 오류로 생기는 극단값 제외
     ew = (1 + rets.mean(axis=1, skipna=True).fillna(0)).cumprod() * 100
     curves["동일가중(같은 종목들)"] = ew
     cstats = {k: stats_curve(v) for k, v in curves.items()}
