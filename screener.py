@@ -399,7 +399,9 @@ def late_stage(r):
 
 
 def quality_adj(s, signal=None):
-    """기저 품질·2단계 진행도 가감점과 인수합병 의심 여부. 반환: dict(late, base, pinned, notes)
+    """기저 품질·2단계 진행도·추세·패턴 가감점과 인수합병 의심 여부.
+    백테스트(2006~, 신호 약 5만 개): 최근 30주선 이탈 뒤 풀백 1.33R vs 1.72R, 헤드앤숄더 천장 뒤 신호 0.78R vs 1.55R,
+    역헤드앤숄더 돌파 1.39R vs 그 외 1.40R(차이 없음), 30주선 기울기 약한 풀백 1.60R vs 1.61R(차이 없음)
     백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
     out = dict(late=0, base=0, trend=0, pat=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
@@ -418,7 +420,7 @@ def quality_adj(s, signal=None):
             out["trend"] = out.get("trend", 0) - 10; out["notes"].append(f"최근 13주 안에 30주선 이탈 ({(mr - 1) * 100:.0f}%) -10")
     if CFG["use_pattern"]:
         if s.get("ihs") and signal == "돌파":
-            out["pat"] = 5; out["notes"].append("역헤드앤숄더 목선 돌파 +5")
+            out["notes"].append("역헤드앤숄더 목선 돌파 (참고 · 백테스트상 가점 효과 없음)")
         if s.get("hs_top"):
             out["pat"] = out.get("pat", 0) - 10; out["notes"].append("헤드앤숄더 천장 완성 -10")
     if signal == "돌파":
