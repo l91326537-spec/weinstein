@@ -448,7 +448,16 @@ function viewSettings(v) {
   <section class="card"><h3>백업</h3>
     <p class="note">보유 종목과 매매일지는 이 휴대폰 브라우저에만 저장돼요. 앱을 지우거나 브라우저 데이터를 지우면 사라지니 가끔 백업 파일을 받아 두세요.</p>
     <div class="btns"><button class="btn" id="exp">백업 파일 받기</button><label class="btn" for="imp">백업 불러오기</label><input id="imp" type="file" accept="application/json,.json" hidden></div></section>
+  <section class="card"><h3>백테스트</h3>
+    <p class="note" id="btinfo">결과 확인 중…</p>
+    <div class="btns"><a class="btn" id="btlink" href="backtest/" hidden>백테스트 결과 보기</a></div>
+    <p class="note">새로 돌리려면 GitHub 저장소 → Actions → backtest → Run workflow. 시작일과 점수 기준을 바꿔 돌릴 수 있고, 15~30분 뒤 여기에 결과가 바뀌어요.</p></section>
   <section class="card"><h3>이 앱</h3><p class="note">시세는 Yahoo Finance 무료 데이터로, 미국장 마감 후 하루 한 번 갱신돼요. 점수는 와인스테인 규칙을 기계적으로 적용한 값이며 투자 조언이 아니고 수익을 보장하지 않습니다.</p></section>`;
+  fetch("backtest/", { method: "HEAD", cache: "no-store" }).then(r => {
+    const el = $("#btinfo", v); if (!el) return;
+    if (r.ok) { const lm = r.headers.get("last-modified"); el.textContent = "최근 결과" + (lm ? " · " + new Date(lm).toLocaleDateString("ko-KR") : ""); $("#btlink", v).hidden = false; }
+    else el.textContent = "아직 백테스트 결과가 없어요.";
+  }).catch(() => { const el = $("#btinfo", v); if (el) el.textContent = "결과를 확인하지 못했어요."; });
   $("#setf", v).onsubmit = e => { e.preventDefault(); const d = store.get(); d.settings = { account: +$("#g_acc", v).value || 0, riskPct: +$("#g_risk", v).value, maxPos: +$("#g_max", v).value || 6 }; store.save(); toast("저장했어요"); };
   $("#exp", v).onclick = () => { const blob = new Blob([JSON.stringify(store.get(), null, 1)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `stage-backup-${today()}.json`; document.body.appendChild(a); a.click(); a.remove(); };
   $("#imp", v).onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!Array.isArray(d.holdings) || !Array.isArray(d.trades)) throw 0; store.replace(d); toast(`불러왔어요 · 보유 ${d.holdings.length} · 거래 ${d.trades.length}`); } catch (_) { toast("백업 파일 형식이 아니에요"); } };

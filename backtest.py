@@ -271,6 +271,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         return f'<span class="{"pos" if x > 0 else "neg" if x < 0 else ""}">{f_(x, d, pct)}</span>'
     P = [f"<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
          f"<title>와인스테인 백테스트</title><style>{css}</style><div class=w>",
+         ("<a href='../' style='display:inline-block;margin-bottom:10px;font-weight:700;color:var(--g)'>← 스테이지 앱</a>" if getattr(args, "web", False) else "") +
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     st = cstats["전략"]; tt = tstats
@@ -338,6 +339,7 @@ def main(argv=None, fetch=None, universe=None):
     ap.add_argument("--min-score", type=int, default=70)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--no-open", action="store_true")
+    ap.add_argument("--web", action="store_true", help="앱 안에 넣을 리포트 (앱으로 돌아가는 링크 포함)")
     args = ap.parse_args(argv)
     start = pd.Timestamp(args.start)
     uni = universe or S.load_universe(args.quick)

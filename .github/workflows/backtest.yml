@@ -1,0 +1,39 @@
+name: backtest
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "start date (YYYY-MM-DD)"
+        default: "2006-01-01"
+      min_score:
+        description: "buy score threshold"
+        default: "70"
+permissions:
+  contents: write
+  actions: write
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python backtest.py --start "${{ inputs.start }}" --min-score "${{ inputs.min_score }}" --no-open --web
+      - name: save report
+        run: |
+          mkdir -p docs/backtest
+          cp reports/backtest_*.html docs/backtest/index.html
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add docs/backtest/index.html
+          git commit -m "backtest result" || exit 0
+          git pull --rebase
+          git push
+      - name: redeploy app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main.yml
