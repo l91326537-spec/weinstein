@@ -139,9 +139,20 @@ def _russell2000():
     return out
 
 
+def _first_ok(*fns):
+    err = None
+    for fn in fns:
+        try:
+            return fn()
+        except Exception as e:
+            err = e
+    raise err
+
+
 SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
     ("sp500", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 400)),
-    ("ndx", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90)),
+    ("ndx", "대형", lambda: _first_ok(lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_Nasdaq-100_companies", 90),
+                                       lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90))),
     ("sp400", "중형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 300)),
     ("r2000", "소형", _russell2000),
 ]
