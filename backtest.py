@@ -339,6 +339,37 @@ def entry_study(frames, bsig):
     return out
 
 
+EXT_BINS = [(-8, -5), (-5, -3), (-3, 0), (0, 3), (3, 5), (5, 8), (8, 12), (12, 16), (16, 20)]
+
+
+def ext_study(frames, start, capmap, score_col="score2TPt", min_sc=60):
+    """2단계·30주선 상승 중인 종목을 30주선 이격 구간별로 다음 주 시가에 샀다면 (손절: 3주 저점 -1%·30주선 -2% 중 낮은 쪽, 4단계까지 보유)"""
+    res = {b: [] for b in EXT_BINS}
+    for t, f in frames.items():
+        if capmap.get(t) == "소형":
+            continue
+        st, sl, ext, ma, low3, o = f["stage"].values, f["slope"].values, f["ext"].values, f["ma30"].values, f["low3"].values, f["open"].values
+        sc = f[score_col].values
+        ok = f.index >= start
+        last = {b: -99 for b in EXT_BINS}
+        for i in range(30, len(f) - 1):
+            if not ok[i] or st[i] != 2 or not (sl[i] > S.CFG["flat_pct"]) or not (sc[i] >= min_sc):
+                continue
+            for b in EXT_BINS:
+                if b[0] <= ext[i] < b[1]:
+                    if i - last[b] <= 8:
+                        break
+                    last[b] = i
+                    e = o[i + 1]
+                    s0 = min(low3[i] * 0.99, ma[i] * 0.98, e * 0.97)
+                    if (e - s0) / e * 100 > 25:
+                        break
+                    tr = _hold_from(f, i + 1, e, s0, False, None)
+                    res[b].append(((tr[3] / e - 1) * 100 - 2 * BT["cost_pct"], tr[4], (e - s0) / e * 100))
+                    break
+    return res
+
+
 def fetch_earnings(tickers):
     """야후에서 과거 실적 발표 날짜 (종목당 최대 60개 ≈ 15년). 실패한 종목은 빠짐"""
     import concurrent.futures as cf
@@ -861,6 +892,7 @@ def main(argv=None, fetch=None, universe=None):
     bk = sigs["cur"]
     bk = bk[bk["kind"].isin(["B12", "B2"]) & (bk["score"] >= args.min_score)]
     es = entry_study(frames, bk)
+    exs = ext_study(frames, start, capmap)
     # 실적 발표 날짜 (야후). 매수 후 2주 안에 실적 발표가 있었는지
     earn = fetch_earnings(sorted(set(sigs["cur"]["ticker"])))
     def near_earn(t, d, days=14):
@@ -971,6 +1003,10 @@ def main(argv=None, fetch=None, universe=None):
     es_row("[진입] 되돌림 100% · 체결된 것만", [p for p, ok in zip(es["C"], es["Cfill"]) if ok])
     es_row("[추매] 10주선 터치 (수익 +5%·RS>0·10주선 상승 중)", es["add10"])
     es_row("[추매] 30주선 터치 (수익 +5%)", es["add30"])
+    for b in EXT_BINS:
+        pr = exs[b]
+        sw = np.mean([x[2] for x in pr]) if pr else 0
+        es_row(f"[이격] 30주선 {b[0]:+d}~{b[1]:+d}% (평균 손절폭 {sw:.1f}%)", [(x[0], x[1]) for x in pr])
     for lab, m in [("[진행도] 30주선 상승 20주 이하", allsig["upw"] <= 20), ("[진행도] 21~39주", (allsig["upw"] > 20) & (allsig["upw"] < 40)),
                    ("[진행도] 40주 이상", allsig["upw"] >= 40), ("[진행도] 52주 +60% 이상", allsig["rise"] >= 60),
                    ("[진행도] 후반 아님", ~late), ("[진행도] 후반", late),
