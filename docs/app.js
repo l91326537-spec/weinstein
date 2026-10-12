@@ -382,6 +382,16 @@ async function viewHold(v) {
   const d = store.get(), H = d.holdings;
   v.innerHTML = `<div class="row between"><h1>보유</h1><a class="btn sm" href="#settings">설정·백업</a></div>
     <p class="note">백테스트에서 가장 나았던 규칙을 써요: 초기 손절(돌파 매수 -5%, 풀백 매수 = 3주 저점·30주선 아래)만 지키고, 그 뒤엔 종목이 4단계가 될 때까지 보유해요. 4단계가 되면 '4단계 · 매도'로 표시돼요.</p>
+    <section class="card"><h3>종목 바로 추가</h3>
+      <form class="form" id="qa">
+        <div class="grid2"><label>티커<input id="qa_t" required autocapitalize="characters" placeholder="예: NVDA" style="text-transform:uppercase"></label>
+        <label>매수가<input id="qa_p" type="number" step="any" inputmode="decimal" required></label></div>
+        <div class="grid2"><label>수량<input id="qa_n" type="number" step="any" inputmode="decimal" required></label>
+        <label>매수일<input id="qa_d" type="date" value="${today()}" required></label></div>
+        <p class="note" id="qa_err" style="color:var(--s4)"></p>
+        <button class="btn primary" type="submit">추가하고 평가</button>
+      </form><p class="note">손절가는 그 종목의 지금 신호로 자동으로 정해져요(돌파 -5%, 풀백 = 3주 저점·30주선 아래, 그 외 매수가 -5%). 카드의 '수정'에서 바꿀 수 있어요.</p></section>
+    <section class="card" id="pf"${H.length ? "" : " hidden"}><h3>포트폴리오 평가</h3><div class="muted">계산 중…</div></section>
     ${H.length > d.settings.maxPos ? `<div class="warn">보유 ${H.length}종목 · 설정한 최대 ${d.settings.maxPos}종목을 넘었어요</div>` : ""}
     <div class="list" id="hl">${H.length ? H.map(h => `<div class="card" data-id="${h.id}"><div class="muted">${esc(h.t)} 계산 중…</div></div>`).join("") : `<div class="empty">보유 종목이 없습니다.<br>종목 화면에서 '매수 기록'을 누르면 여기서 손절선을 관리해요.</div>`}</div>`;
   for (const h of H) {
@@ -404,6 +414,79 @@ async function viewHold(v) {
       $("[data-del]", el).onclick = () => confirmSheet(`${h.t} 보유 기록을 삭제할까요?`, () => { const d2 = store.get(); d2.holdings = d2.holdings.filter(x => x.id !== h.id); store.save(); route(); });
     } catch (e) { el.innerHTML = `<b class="mono">${esc(h.t)}</b><p class="note">이 종목 데이터가 없습니다. 저장소의 my_tickers.txt에 추가하면 다음 갱신부터 계산돼요.</p>`; }
   }
+  bindQuickAdd(v);
+  if (H.length) renderPortfolio(v, H, d.settings);
+}
+
+function bindQuickAdd(v) {
+  const f = $("#qa", v); if (!f) return;
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const t = $("#qa_t", v).value.trim().toUpperCase(), price = +$("#qa_p", v).value, n = +$("#qa_n", v).value, date = $("#qa_d", v).value;
+    const err = $("#qa_err", v);
+    if (!t || !(price > 0) || !(n > 0)) { err.textContent = "티커, 매수가, 수량을 확인하세요."; return; }
+    let td = null; try { td = await loadT(t); } catch (_) { }
+    if (!td) { err.textContent = `${t} 데이터가 없어요. S&P500·나스닥100·S&P400·러셀2000에 없는 종목은 저장소의 my_tickers.txt에 추가하면 다음 갱신부터 돼요.`; return; }
+    const stop = td.signal === "풀백" && td.pbStop && td.pbStop < price ? td.pbStop : price * 0.95;
+    const d = store.get();
+    d.holdings.push({ id: uid(), t: td.t, buyDate: date, buyPrice: price, initStop: +stop.toFixed(2), shares: n, note: "", violations: ruleCheck(td), scoreAtBuy: td.score });
+    store.save(); toast(`${td.t} 추가했어요`); route();
+  };
+}
+
+/* 포트폴리오 평가: 종목 질 40 · 단계 20 · 섹터 분산 20 · 손절 위험 20 */
+async function renderPortfolio(v, H, set) {
+  const el = $("#pf", v); if (!el) return;
+  const rows = [];
+  for (const h of H) {
+    try {
+      const td = await loadT(h.t), st = holdStatus(td, h);
+      const val = toKRW(st.close * h.shares, h.t), riskAmt = st.broke ? 0 : Math.max(0, toKRW((st.close - st.stop) * h.shares, h.t));
+      rows.push({ h, td, st, val, riskAmt, sector: td.sector || "기타", score: td.score ?? null });
+    } catch (_) { }
+  }
+  if (!document.body.contains(el) || !rows.length) return;
+  const total = rows.reduce((a, r) => a + r.val, 0) || 1;
+  const w = r => r.val / total;
+  // 종목 질: 평가금액 가중 평균 점수
+  const scored = rows.filter(r => r.score != null), sw = scored.reduce((a, r) => a + w(r), 0);
+  const avgScore = sw ? scored.reduce((a, r) => a + r.score * w(r), 0) / sw : 0;
+  const pQual = Math.round(avgScore * 0.4);
+  // 단계: 2단계 비중
+  const stageW = k => rows.filter(r => r.td.stage === k).reduce((a, r) => a + w(r), 0);
+  const pStage = Math.round(20 * (stageW(2) + 0.5 * stageW(1) + 0.25 * stageW(3)));
+  // 섹터 분산
+  const secs = {}; rows.forEach(r => secs[r.sector] = (secs[r.sector] || 0) + w(r));
+  const secList = Object.entries(secs).sort((a, b) => b[1] - a[1]);
+  const top = secList[0][1] * 100;
+  let pDiv = top <= 30 ? 20 : top <= 40 ? 15 : top <= 50 ? 10 : top <= 70 ? 5 : 0;
+  if (rows.length >= 3 && secList.length === 1) pDiv = 0;
+  // 손절 위험: 모든 종목이 손절될 때 계좌 손실 %
+  const acct = set.account || total;
+  const riskPct = rows.reduce((a, r) => a + r.riskAmt, 0) / acct * 100;
+  const broken = rows.filter(r => r.st.broke || r.td.stage === 4).length;
+  let pRisk = riskPct <= 5 ? 20 : riskPct <= 8 ? 15 : riskPct <= 12 ? 10 : riskPct <= 20 ? 5 : 0;
+  pRisk = Math.max(0, pRisk - broken * 5);
+  let score = pQual + pStage + pDiv + pRisk;
+  const notes = [];
+  if (SUM && SUM.worst === 4) { score = Math.min(score, 50); notes.push("시장 4단계: 신규 매수 보류, 보유 종목 손절 엄수"); }
+  if (top > 40) notes.push(`${secList[0][0]} 비중 ${top.toFixed(0)}% · 한 업종 쏠림`);
+  if (broken) notes.push(`손절 이탈·4단계 종목 ${broken}개 정리 필요`);
+  if (riskPct > 12) notes.push(`전부 손절되면 계좌 -${riskPct.toFixed(1)}% · 손절 위험이 커요`);
+  const weak = rows.filter(r => r.score != null && r.score < 50).map(r => r.h.t);
+  if (weak.length) notes.push(`50점 미만: ${weak.join(", ")}`);
+  if (rows.length > set.maxPos) notes.push(`최대 ${set.maxPos}종목 초과`);
+  const bar = (lab, val, max) => { const p = Math.min(1, val / max) * 100, c = p >= 75 ? "var(--s2)" : p >= 50 ? "#5f8a2c" : p >= 25 ? "var(--s3)" : "var(--s4)"; return `<div class="brow"><span>${lab}</span><div class="track"><div class="fill" style="width:${p}%;background:${c}"></div></div><span class="v"><b>${val}</b>/${max}</span></div>`; };
+  const palette = ["var(--s2)", "var(--s1)", "var(--s3)", "#8e5cc8", "#2a9db0", "var(--s4)", "var(--s0)"];
+  el.innerHTML = `<h3>포트폴리오 평가</h3>
+    <div class="row" style="flex-wrap:nowrap;gap:14px">${ring(Math.round(score), 76)}
+      <div style="min-width:0"><b>${score >= 80 ? "튼튼해요" : score >= 65 ? "괜찮아요 · 보완점 있음" : score >= 50 ? "점검이 필요해요" : "위험해요"}</b>
+      <div class="muted" style="font-size:12px">${rows.length}종목 · 평가금액 약 ${Math.round(total / 10000).toLocaleString()}만원 · 평균 점수 ${avgScore.toFixed(0)}</div></div></div>
+    <div class="bars">${bar("종목 질", pQual, 40)}${bar("단계", pStage, 20)}${bar("섹터 분산", pDiv, 20)}${bar("손절 위험", pRisk, 20)}</div>
+    <div><div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${secList.map(([n, x], i) => `<span title="${esc(n)}" style="width:${x * 100}%;background:${palette[i % palette.length]}"></span>`).join("")}</div>
+    <div class="row" style="gap:4px 12px;margin-top:6px;font-size:12px">${secList.map(([n, x], i) => `<span><span style="color:${palette[i % palette.length]}">●</span> ${esc(n)} ${(x * 100).toFixed(0)}%</span>`).join("")}</div></div>
+    <p class="note">전부 손절되면 계좌 손실 약 ${riskPct.toFixed(1)}% (계좌 ${Math.round(acct / 10000).toLocaleString()}만원 기준)</p>
+    ${notes.length ? `<div class="warn">${notes.map(esc).join("<br>")}</div>` : `<div class="ok">분산과 손절 위험 모두 양호해요</div>`}`;
 }
 
 /* ---------- 화면: 일지 ---------- */

@@ -178,6 +178,94 @@ def collect_signals(frames, start, min_score_floor=50, ver=1):
     return pd.DataFrame(rows)
 
 
+# ---------------- 거래량·매수 시점 비교용 ----------------
+def _hold_from(f, j0, e, s0, partial_first, vol_check):
+    """j0주에 e로 매수(partial_first면 그 주 중간 매수). 초기 손절만 두고 4단계까지 보유. vol_check면 매수 주 거래량 확인"""
+    o, lo, c, stg, vr = f["open"].values, f["low"].values, f["close"].values, f["stage"].values, f["vr"].values
+    risk = e - s0
+    j = j0
+    if partial_first:
+        if c[j] < s0:                                   # 매수한 주에 바로 손절 (장중 순서를 모르니 종가로 판단)
+            return (f.index[j], f.index[j], e, s0, -1.0, 0, "손절", s0)
+        if vol_check and (vr[j] if not math.isnan(vr[j]) else 0) < vol_check and j + 1 < len(f):
+            px = o[j + 1]
+            return (f.index[j], f.index[j + 1], e, px, (px - e) / risk, 1, "돌파 거래량 부족", s0)
+        j += 1
+    while j < len(f):
+        if lo[j] <= s0:
+            px = min(s0, o[j])
+            return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절", s0)
+        if stg[j] == 4 and j + 1 < len(f):
+            px = o[j + 1]
+            return (f.index[j0], f.index[j + 1], e, px, (px - e) / risk, j - j0 + 1, "4단계 진입", s0)
+        j += 1
+    return (f.index[j0], None, e, c[-1], (c[-1] - e) / risk, len(f) - 1 - j0, "보유 중", s0)
+
+
+def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50):
+    """vol_rule: 'base'(돌파 1.5배) | 'strict'(돌파 2배·풀백은 거래량 감소)
+       entry_rule: 'monday'(신호 다음 주 시가) | 'stop'(저항선 +0.5% 매수 스톱) | 'stopvol'(매수 스톱 + 그 주 거래량 2배 미만이면 다음 주 매도)"""
+    pct = S.CFG["breakout_stop_pct"]
+    rows = []
+    for t, f in frames.items():
+        sc, sg = f["score2"].values, f["signal2"].values
+        o, h, c, res, vr, bvr = f["open"].values, f["high"].values, f["close"].values, f["res"].values, f["vr"].values, f["brk_vr"].values
+        st, slope, ma, low3 = f["stage"].values, f["slope"].values, f["ma30"].values, f["low3"].values
+        idx_ok = f.index >= start
+        last_entry = -99
+        for i in range(30, len(f) - 1):
+            if not idx_ok[i] or not (sc[i] >= min_score_floor):
+                continue
+            g = sg[i]
+            # 풀백: 신호 다음 주 시가 매수
+            if g == "풀백":
+                if vol_rule == "strict" and not (vr[i] < 1.0):
+                    continue
+                if i - last_entry <= 4:
+                    continue
+                e = o[i + 1]
+                s0 = min(min(low3[i] * 0.99, ma[i] * 0.98), e * (1 - BT["min_stop_pct"] / 100))
+                if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"]:
+                    continue
+                tr = _hold_from(f, i + 1, e, s0, False, None)
+            elif g == "돌파" and entry_rule == "monday":
+                if vol_rule == "strict" and not (bvr[i] >= 2.0):
+                    continue
+                if i - last_entry <= 4:
+                    continue
+                e = o[i + 1]
+                s0 = e * (1 - pct / 100)
+                tr = _hold_from(f, i + 1, e, s0, False, None)
+            else:
+                tr = None
+            if tr:
+                last_entry = i
+                ent, ex, e, px, R, wk, why, s0 = tr
+                rows.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0,
+                                 R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, score=float(sc[i]),
+                                 signal=g, stage_label=f["stage_label"].iloc[i], dup=False))
+            # 매수 스톱: 지난주까지 저항선 아래 7% 이내 + 이번 주 고가가 저항선 +0.5%를 넘으면 그 가격에 매수
+            if entry_rule in ("stop", "stopvol"):
+                j = i + 1
+                if j - last_entry <= 4 or not (st[i] in (1, 2)) or not (slope[i] >= -S.CFG["flat_pct"]):
+                    continue
+                r_ = res[j]
+                if math.isnan(r_) or not (r_ * 0.93 <= c[i] < r_):
+                    continue
+                trig = r_ * 1.005
+                if h[j] < trig or o[j] > r_ * (1 + S.CFG["breakout_chase_pct"] / 100):
+                    continue
+                e = max(o[j], trig)
+                s0 = e * (1 - pct / 100)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if entry_rule == "stopvol" else None)
+                last_entry = j
+                ent, ex, e, px, R, wk, why, s0 = tr
+                rows.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0,
+                                 R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, score=float(sc[i]),
+                                 signal="돌파", stage_label=f["stage_label"].iloc[i], dup=False))
+    return pd.DataFrame(rows)
+
+
 # ---------------- 포트폴리오 ----------------
 def run_portfolio(sig, frames, cal, min_score):
     cands = sig[(sig["score"] >= min_score)].sort_values(["entry_date", "score"], ascending=[True, False])
@@ -307,7 +395,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>점수표 · 손절 조합 비교</h2><div class=mut style='margin-bottom:6px'>v1 = 예전 점수표, v2 = 손절폭이 작은 자리(돌파 직후·30주선 근처)와 거래량에 높은 점수, 이격 과열 감점. "
+        P.append("<h2>거래량 원칙 · 매수 시점 비교</h2><div class=mut style='margin-bottom:6px'>모두 v2 점수 · 돌파 손절 -5% · 풀백 손절 3주 저점·30주선 아래 · 4단계까지 보유. 각 줄 아래 회색 글씨는 신호 하나하나를 따라간 돌파·풀백 성적이에요. "
                  f"아래 나머지 표는 연평균이 가장 높았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -406,31 +494,31 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("점수표·손절 조합별로 거래를 따라가는 중...")
-    GRID = [  # (이름, 점수표, 초기 손절, 돌파 손절 %, 파는 규칙)
-        ("① v1 점수 · 10주 저점 손절 · 4단계까지", 1, "base", None, "E 4단계까지 보유"),
-        ("② v2 점수 · 10주 저점 손절 · 4단계까지", 2, "base", None, "E 4단계까지 보유"),
-        ("③ v2 점수 · 돌파 -3% / 풀백 저점 · 4단계까지", 2, "entry", 3.0, "E 4단계까지 보유"),
-        ("④ v2 점수 · 돌파 -5% / 풀백 저점 · 4단계까지", 2, "entry", 5.0, "E 4단계까지 보유"),
-        ("⑤ v2 점수 · 돌파 -3% / 풀백 저점 · 30주선 추적", 2, "entry", 3.0, "B 30주선 추적"),
-        ("⑥ v2 점수 · 돌파 -3% / 풀백 저점 · 2R 후 30주선", 2, "entry", 3.0, "D 2R 후 30주선"),
+    print("거래량 원칙·매수 시점 조합별로 거래를 따라가는 중...")
+    GRID = [  # (이름, 거래량 규칙, 매수 시점)
+        ("① 기준: 돌파 거래량 1.5배 · 신호 다음 주 시가 매수", "base", "monday"),
+        ("② 거래량 강화: 돌파 2배 · 풀백은 거래량 감소 때만", "strict", "monday"),
+        ("③ 매수 스톱: 저항선 +0.5% 돌파 순간 매수", "base", "stop"),
+        ("④ 매수 스톱 + 돌파 주 거래량 2배 미만이면 다음 주 매도", "base", "stopvol"),
+        ("⑤ 거래량 강화 + 매수 스톱·거래량 확인", "strict", "stopvol"),
     ]
+    EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
+    STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     comp, runs, combos = [], {}, {}
-    for name, ver, smode, pct, ex in GRID:
-        EXIT.clear(); EXIT.update(EXITS[ex])
-        STOP.clear(); STOP.update(mode=smode, pct=pct)
-        sg = collect_signals(frames, start, ver=ver)
+    for name, vol_rule, entry_rule in GRID:
+        sg = collect_variant(frames, start, vol_rule, entry_rule)
         if sg.empty:
             continue
         e_, t_ = run_portfolio(sg, frames, cal, args.min_score)
         cs, ts = stats_curve(e_["equity"]), stats_trades(t_)
-        cl = sg[~sg["dup"]]
-        hi = stats_trades(cl[cl["score"] >= 75]); lo_ = stats_trades(cl[cl["score"] < 65])
-        desc = f"점수표 v{ver} · 초기 손절 {'매수 방식별 (돌파 -' + str(int(pct)) + '%, 풀백 = 3주 저점·30주선 아래)' if smode == 'entry' else '최근 10주 저점 아래'} · 파는 규칙: {EXITS[ex]['desc']}"
+        bk, pb = stats_trades(sg[sg["signal"] == "돌파"]), stats_trades(sg[sg["signal"] == "풀백"])
+        hi = stats_trades(sg[sg["score"] >= 75]); lo_ = stats_trades(sg[sg["score"] < 65])
+        desc = (f"돌파 {bk.get('n', 0)}건 · 승률 {f_(bk.get('win'), 0)}% · 평균 {f_(bk.get('avgR'), 2)}R / "
+                f"풀백 {pb.get('n', 0)}건 · 승률 {f_(pb.get('win'), 0)}% · 평균 {f_(pb.get('avgR'), 2)}R")
         comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=hi.get("avgR"), loR=lo_.get("avgR")))
         runs[name] = (sg, e_, t_)
-        combos[name] = (ver, smode, pct, ex)
-        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 거래 {ts.get('n', 0)}")
+        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유")
+        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 거래 {ts.get('n', 0)} | {desc}")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
