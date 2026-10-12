@@ -288,8 +288,10 @@ def _victim(pos, frames, d, mode, new_score):
     return best
 
 
-def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80):
+def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None):
+    """fill: 남는 돈을 ETF로 채우기. dict(o=시가, c=종가, mkt=시장 단계, frac=채울 비율, half3=3단계면 절반, filt=4단계면 매도, band=리밸런싱 폭%)"""
     mp = max_pos or BT["max_pos"]
+    etf_sh, inv_sum = 0.0, 0.0
     cands = sig[(sig["score"] >= min_score)].sort_values(["entry_date", "score"], ascending=[True, False])
     by_week = {d: g for d, g in cands.groupby("entry_date")}
     cash, equity = 100.0, 100.0
@@ -298,6 +300,26 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
     cost = BT["cost_pct"] / 100
     wcap = min(BT["max_weight"], 100.0 / mp)        # 한 종목 비중 상한: 25%와 1/보유종목수 중 작은 값
     for d in cal:
+        eo = None
+        if fill is not None:
+            eo = fill["o"].asof(d)
+            if pd.isna(eo):
+                eo = None
+        # 0) ETF 맞추기: 지난주 시장 단계를 보고 이번 주 시가에 (차이가 band% 넘을 때만)
+        if eo is not None:
+            mprev = fill["mkt"][fill["mkt"].index < d]
+            ms = mprev.iloc[-1] if len(mprev) else np.nan
+            frac = fill["frac"]
+            if fill.get("filt", True) and ms == 4:
+                frac = 0.0
+            elif fill.get("half3") and ms == 3:
+                frac = frac / 2
+            etf_v = etf_sh * eo
+            target = frac * (cash + etf_v)
+            if abs(target - etf_v) > equity * fill.get("band", 10) / 100 or (target == 0 and etf_v > 0):
+                dv = target - etf_v
+                cash -= dv + abs(dv) * cost
+                etf_sh = target / eo
         # 1) 이번 주 시가 매수 (지난주까지의 자금으로), 자리가 꽉 찼으면 갈아타기 규칙 확인
         if d in by_week:
             for _, r in by_week[d].iterrows():
@@ -324,11 +346,16 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 if risk_ps <= 0:
                     continue
                 shares = equity * BT["risk_pct"] / 100 / risk_ps
-                val = min(shares * r["entry"], equity * wcap / 100, cash / (1 + cost))
+                liquid = cash + (etf_sh * eo if eo is not None else 0)
+                val = min(shares * r["entry"], equity * wcap / 100, liquid / (1 + 2 * cost))
                 if val < equity * 0.01:
                     continue
                 shares = val / r["entry"]
                 cash -= val * (1 + cost)
+                if cash < 0 and eo is not None:      # 모자라는 돈은 ETF를 팔아서
+                    sell = min(-cash / (1 - cost), etf_sh * eo)
+                    etf_sh -= sell / eo
+                    cash += sell * (1 - cost)
                 pos[r["ticker"]] = dict(shares=shares, exit_date=r["exit_date"], exit=r["exit"], r=r)
         # 2) 이번 주 청산
         for t in list(pos):
@@ -343,9 +370,13 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
             cl = frames[t]["close"]
             px = cl.asof(d)
             mv += p["shares"] * (px if pd.notna(px) else p["r"]["entry"])
-        equity = cash + mv
-        curve.append((d, equity, len(pos)))
-    eq = pd.DataFrame(curve, columns=["date", "equity", "n"]).set_index("date")
+        ev = 0.0
+        if fill is not None and etf_sh:
+            ec = fill["c"].asof(d)
+            ev = etf_sh * (ec if pd.notna(ec) else (eo or 0))
+        equity = cash + mv + ev
+        curve.append((d, equity, len(pos), mv / equity * 100 if equity else 0, ev / equity * 100 if equity else 0))
+    eq = pd.DataFrame(curve, columns=["date", "equity", "n", "stk", "etf"]).set_index("date")
     return eq, pd.DataFrame(trades)
 
 
@@ -435,7 +466,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>보유 종목 수 · 갈아타기 비교</h2><div class=mut style='margin-bottom:6px'>모두 같은 신호(v2 점수 · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백 · 4단계까지 보유)로, 동시에 들고 있는 종목 수와 갈아타기 규칙만 바꿨어요. 비중은 손절 시 계좌 1% 위험과 1/종목수 중 작은 쪽. "
+        P.append("<h2>남는 돈 채우기 비교 (현금 vs QQQ vs SPY)</h2><div class=mut style='margin-bottom:6px'>모두 같은 신호(v2 점수 · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백 · 4단계까지 보유 · 갈아타기 없음). 종목에 안 들어간 돈을 어떻게 둘지만 바꿨어요. 새 종목을 살 때는 ETF를 팔아 사고, ETF는 목표와 계좌의 10% 넘게 차이 날 때만 지난주 시장 단계를 보고 이번 주 시가에 맞춰요. 현금 이자는 0으로 계산. "
                  f"아래 나머지 표는 연평균이 가장 높았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -534,35 +565,42 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("보유 종목 수·갈아타기 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("남는 돈 채우기 방식별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
     if base_sig.empty:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
-    GRID = [  # (이름, 최대 보유 종목 수, 갈아타기)
-        ("4종목", 4, None), ("6종목", 6, None), ("8종목", 8, None), ("10종목", 10, None), ("15종목", 15, None),
-        ("6종목 + 약한 종목 교체", 6, "weak"), ("10종목 + 약한 종목 교체", 10, "weak"),
-        ("6종목 + 25점 차 교체", 6, "gap"), ("10종목 + 25점 차 교체", 10, "gap"),
+    def F(etf, frac=1.0, half3=False, filt=True):
+        if etf not in dfs:
+            return "skip"
+        x = dfs[etf]
+        return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=10)
+    GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명)
+        ("6종목 · 남는 돈 현금", 6, None, "지금 방식. 종목에 안 들어간 돈은 현금"),
+        ("6종목 · 남는 돈 QQQ", 6, F("QQQ"), "남는 돈은 전부 QQQ, 시장 4단계면 QQQ 매도"),
+        ("6종목 · 남는 돈 SPY", 6, F("SPY"), "남는 돈은 전부 SPY, 시장 4단계면 SPY 매도"),
+        ("6종목 · 남는 돈 절반 QQQ", 6, F("QQQ", 0.5), "남는 돈의 절반은 QQQ, 절반은 현금, 시장 4단계면 QQQ 매도"),
+        ("6종목 · QQQ, 3단계 절반", 6, F("QQQ", 1.0, half3=True), "남는 돈은 QQQ, 시장 3단계면 절반으로, 4단계면 전부 매도"),
+        ("6종목 · QQQ, 시장 필터 없음", 6, F("QQQ", 1.0, filt=False), "남는 돈은 언제나 QQQ (시장 단계와 상관없이)"),
+        ("10종목 · 남는 돈 QQQ", 10, F("QQQ"), "10종목, 남는 돈은 QQQ, 시장 4단계면 QQQ 매도"),
     ]
-    rot_desc = {None: "갈아타기 없음 · 손절이나 4단계 때만 매도",
-                "weak": "꽉 찼을 때 80점+ 신호가 나오면, 4주 이상 보유한 종목 중 50점 미만·3단계·RS 0선 아래 하락·업종 3·4단계인 종목을 팔고 교체",
-                "gap": "꽉 찼을 때 80점+ 신호가 나오면, 4주 이상 보유한 종목 중 새 종목보다 25점 이상 낮은 종목을 팔고 교체"}
     comp, runs, combos = [], {}, {}
-    for name, mp_, rot in GRID:
-        e_, t_ = run_portfolio(base_sig, frames, cal, args.min_score, max_pos=mp_, rotate=rot)
+    for name, mp_, fl, why in GRID:
+        if fl == "skip":
+            continue
+        e_, t_ = run_portfolio(base_sig, frames, cal, args.min_score, max_pos=mp_, fill=fl)
         cs, ts = stats_curve(e_["equity"]), stats_trades(t_)
-        nrot = int((t_["why"] == "갈아타기").sum()) if len(t_) else 0
-        avg_n = float(e_["n"].mean())
-        desc = f"한 종목 최대 {min(BT['max_weight'], 100 / mp_):.0f}% · 평균 보유 {avg_n:.1f}종목 · {rot_desc[rot]}" + (f" · 교체 {nrot}번" if rot else "")
+        desc = (f"{why} · 한 종목 최대 {min(BT['max_weight'], 100 / mp_):.0f}% · 평균 보유 {e_['n'].mean():.1f}종목 · "
+                f"평균 투자 비중: 종목 {e_['stk'].mean():.0f}% + ETF {e_['etf'].mean():.0f}% = {e_['stk'].mean() + e_['etf'].mean():.0f}%")
         comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=None, loR=None))
         runs[name] = (base_sig, e_, t_)
-        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, rot)
-        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 거래 {ts.get('n', 0)} · 교체 {nrot}")
+        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl)
+        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 종목 {e_['stk'].mean():.0f}% · ETF {e_['etf'].mean():.0f}%")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
-    ver_b, smode_b, pct_b, ex_b, mp_b, rot_b = combos[best]
+    ver_b, smode_b, pct_b, ex_b, mp_b, fill_b = combos[best]
     EXIT.clear(); EXIT.update(EXITS[ex_b])
     STOP.clear(); STOP.update(mode=smode_b, pct=pct_b)
     for f in frames.values():
@@ -575,7 +613,7 @@ def main(argv=None, fetch=None, universe=None):
         ss = sig[sig["cap"] == cp]
         if ss.empty:
             continue
-        e3, t3 = run_portfolio(ss, frames, cal, args.min_score, max_pos=mp_b, rotate=rot_b)
+        e3, t3 = run_portfolio(ss, frames, cal, args.min_score, max_pos=mp_b, fill=fill_b)
         cl3 = ss[~ss["dup"]]
         seg.append(dict(name=cp, n_t=int(ss["ticker"].nunique()), c=stats_curve(e3["equity"]), t=stats_trades(t3), s=stats_trades(cl3)))
         print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
@@ -592,7 +630,7 @@ def main(argv=None, fetch=None, universe=None):
     tstats = stats_trades(trades)
     variants = {}
     for ms in sorted({65, 70, 75, 80, args.min_score}):
-        e2, t2 = run_portfolio(sig, frames, cal, ms, max_pos=mp_b, rotate=rot_b)
+        e2, t2 = run_portfolio(sig, frames, cal, ms, max_pos=mp_b, fill=fill_b)
         variants[f"{ms}점 이상"] = (stats_curve(e2["equity"]), stats_trades(t2))
     clean = sig[~sig["dup"]]
     bins = [(50, 65, "50–64 관찰"), (65, 75, "65–74 조건부"), (75, 80, "75–79"), (80, 90, "80–89 적극"), (90, 101, "90+")]
