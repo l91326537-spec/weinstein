@@ -1,0 +1,546 @@
+# -*- coding: utf-8 -*-
+"""
+와인스테인 주봉 스크리너
+- S&P500 + 나스닥100 전 종목(+ my_tickers.txt)을 주봉으로 받아
+  30주선 단계, 맨스필드 RS, 거래량, 베이스 돌파를 계산하고 점수를 매깁니다.
+- 결과: reports/report_YYYY-MM-DD.html, results_YYYY-MM-DD.csv, board_import_YYYY-MM-DD.json
+실행: python screener.py            (전체)
+      python screener.py --quick    (나스닥100 + 내 종목만, 빠른 확인용)
+"""
+import argparse, datetime as dt, html, io, json, math, os, sys, time
+
+import numpy as np
+import pandas as pd
+
+try:  # 윈도우 창에 진행 상황이 바로바로 보이게
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
+except Exception:
+    pass
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "reports")
+
+# ---------------- 설정 (원하면 숫자만 바꾸세요) ----------------
+CFG = {
+    "slope_weeks": 10,       # 30주선 기울기를 볼 기간(주)
+    "flat_pct": 0.8,         # 10주간 30주선 변화가 ±이 % 안이면 '평평'
+    "whipsaw": 3,            # 최근 15주 동안 30주선을 이 횟수 이상 넘나들면 방향 미정(1·3단계)
+    "base_weeks": 26,        # 저항선(베이스 상단)을 찾을 기간(주)
+    "breakout_recent": 3,    # 최근 몇 주 안의 돌파를 '돌파'로 볼지
+    "overheat_pct": 20.0,    # 30주선 대비 이 % 이상이면 과열
+    "stop_risk_pct": 15.0,   # 손절폭 이 % 초과면 위험
+    "stop_lookback": 10,     # 손절 기준 저점을 찾을 기간(주)
+    "min_price": 5.0,        # 이 가격 미만 종목 제외
+    "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
+}
+
+SECTOR_ETF = {  # GICS 섹터 → SPDR 섹터 ETF
+    "Information Technology": "XLK", "Health Care": "XLV", "Financials": "XLF",
+    "Consumer Discretionary": "XLY", "Communication Services": "XLC", "Industrials": "XLI",
+    "Consumer Staples": "XLP", "Energy": "XLE", "Utilities": "XLU", "Real Estate": "XLRE",
+    "Materials": "XLB",
+}
+SECTOR_KO = {
+    "Information Technology": "정보기술", "Health Care": "헬스케어", "Financials": "금융",
+    "Consumer Discretionary": "경기소비재", "Communication Services": "커뮤니케이션",
+    "Industrials": "산업재", "Consumer Staples": "필수소비재", "Energy": "에너지",
+    "Utilities": "유틸리티", "Real Estate": "부동산", "Materials": "소재",
+}
+INDUSTRY_ETF = {  # 세부 업종 ETF (업종 단계 표에만 표시)
+    "SMH": "반도체", "IGV": "소프트웨어", "FDN": "인터넷", "ARKF": "핀테크", "CIBR": "사이버보안",
+    "BOTZ": "로봇·AI", "XBI": "바이오", "IHI": "의료기기", "KRE": "지역은행", "IAI": "증권·거래소",
+    "ITA": "항공우주·방산", "JETS": "항공", "XHB": "주택건설", "XRT": "소매", "TAN": "태양광",
+    "URA": "우라늄", "XME": "금속·광업", "GDX": "금광", "OIH": "석유서비스", "IYT": "운송",
+    "PAVE": "인프라", "KWEB": "중국 인터넷", "IBB": "바이오(대형)", "SKYY": "클라우드",
+}
+MARKET = {"^IXIC": "나스닥", "^GSPC": "S&P500"}
+BENCH = {"us": "^GSPC", "ks": "^KS11", "kq": "^KQ11"}
+
+
+# ---------------- 종목 목록 ----------------
+def _read_html(url):
+    import requests
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (screener)"}, timeout=30)
+    r.raise_for_status()
+    return pd.read_html(io.StringIO(r.text))
+
+
+def load_universe(quick=False):
+    """ticker -> {"name","sector","bench"}"""
+    uni = {}
+    print("종목 목록 받는 중 (위키피디아)...")
+    if not quick:
+        try:
+            t = _read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+            for _, r in t.iterrows():
+                tk = str(r["Symbol"]).replace(".", "-")
+                uni[tk] = {"name": r["Security"], "sector": r["GICS Sector"], "bench": "us"}
+            print(f"S&P500 {len(t)}종목 불러옴")
+        except Exception as e:
+            print("S&P500 목록을 못 불러왔습니다:", e)
+    try:
+        for t in _read_html("https://en.wikipedia.org/wiki/Nasdaq-100"):
+            cols = [str(c) for c in t.columns]
+            tcol = next((c for c in t.columns if str(c) in ("Ticker", "Symbol")), None)
+            scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None)
+            if tcol is None or scol is None or len(t) < 90:
+                continue
+            ncol = next((c for c in t.columns if str(c) in ("Company", "Security")), tcol)
+            for _, r in t.iterrows():
+                tk = str(r[tcol]).replace(".", "-")
+                uni.setdefault(tk, {"name": r[ncol], "sector": r[scol], "bench": "us"})
+            print(f"나스닥100 {len(t)}종목 불러옴")
+            break
+    except Exception as e:
+        print("나스닥100 목록을 못 불러왔습니다:", e)
+    # 내 종목 (한 줄에: 티커 [업종명])  예) 005930.KS 반도체 / OUST 로봇
+    path = os.path.join(HERE, "my_tickers.txt")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            tk = parts[0].upper()
+            b = "ks" if tk.endswith(".KS") else "kq" if tk.endswith(".KQ") else "us"
+            info = uni.get(tk, {"name": tk, "sector": None, "bench": b})
+            if len(parts) > 1:
+                info["mysector"] = parts[1]
+            uni[tk] = info
+    if not uni:
+        sys.exit("종목 목록이 비어 있습니다. 인터넷 연결 또는 my_tickers.txt를 확인하세요.")
+    return uni
+
+
+# ---------------- 데이터 ----------------
+def fetch_weekly(tickers, years=3, chunk=50):
+    import yfinance as yf
+    out = {}
+    tickers = list(dict.fromkeys(tickers))
+    for i in range(0, len(tickers), chunk):
+        part = tickers[i:i + chunk]
+        print(f"  주봉 받는 중 {i + 1}~{i + len(part)} / {len(tickers)}")
+        for attempt in range(3):
+            try:
+                start = (dt.date.today() - dt.timedelta(days=int(365.25 * years))).isoformat()
+                data = yf.download(part, start=start, interval="1wk", group_by="ticker",
+                                   auto_adjust=True, threads=True, progress=False, timeout=30)
+                break
+            except Exception as e:
+                print("   재시도:", e)
+                time.sleep(3)
+        else:
+            print("   이 묶음은 건너뜁니다 (야후 응답 없음)")
+            continue
+        time.sleep(1)  # 야후 요청 제한 피하기
+        got = 0
+        for t in part:
+            try:
+                df = data[t] if isinstance(data.columns, pd.MultiIndex) else data
+                df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+                if len(df) >= 60:
+                    out[t] = df
+                    got += 1
+            except Exception:
+                pass
+        print(f"   → {got}/{len(part)}개 받음")
+        if got == 0 and i == 0:
+            print("   ※ 첫 묶음을 하나도 못 받았습니다. 야후가 요청을 막았을 수 있어요. 몇 분 뒤 다시 실행해 보세요.")
+    return out
+
+
+# ---------------- 계산 ----------------
+def indicators(df):
+    """모든 주에 대해 지표를 계산 (각 주는 그 주까지의 데이터만 사용 → 백테스트에도 그대로 씀)"""
+    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+    sw, bw = CFG["slope_weeks"], CFG["base_weeks"]
+    ma = c.rolling(30).mean()
+    f = pd.DataFrame(index=df.index)
+    f["open"], f["high"], f["low"], f["close"] = df["Open"], h, l, c
+    f["ma30"] = ma
+    f["slope"] = (ma / ma.shift(sw) - 1) * 100
+    f["prior"] = (ma / ma.shift(26) - 1) * 100
+    f["ma_peak"] = ma.rolling(100, min_periods=1).max()
+    above = c > ma
+    f["above"] = above
+    f["crosses"] = above.astype(int).diff().abs().rolling(15).sum()
+    res = h.shift(1).rolling(bw).max()           # 지난 26주 고점(이번 주 제외) = 저항
+    f["res"] = res
+    f["base_low"] = l.shift(1).rolling(bw).min()
+    vavg = v.shift(1).rolling(10).mean()
+    vr = (v / vavg).where(vavg > 0, 0.0)
+    f["vr"] = vr
+    brk = (c > res) & (c.shift(1) <= res)
+    f["brk_week"] = np.nan
+    f["brk_level"] = np.nan
+    f["brk_vr"] = np.nan
+    for k in range(CFG["breakout_recent"], 0, -1):   # 가장 최근 돌파가 남도록 먼 쪽부터 덮어씀
+        m = brk.shift(k - 1, fill_value=False)
+        f.loc[m, "brk_week"] = k
+        f.loc[m, "brk_level"] = res.shift(k - 1)[m]
+        f.loc[m, "brk_vr"] = vr.shift(k - 1)[m]
+    chg = c.diff()
+    up = v.where(chg > 0, 0.0).rolling(10).sum()
+    dn = v.where(chg < 0, 0.0).rolling(10).sum()
+    f["updn"] = (up / dn).where(dn > 0, 3.0)
+    f["hi_all"] = h.rolling(156, min_periods=1).max()
+    f["ext"] = (c / ma - 1) * 100
+    f["stop"] = l.rolling(CFG["stop_lookback"]).min() * 0.99
+    f["stop_pct"] = (f["stop"] / c - 1) * 100
+    f["low8"] = l.rolling(8).min()
+    run = above.astype(int).groupby((~above).cumsum()).cumsum()
+    f["weeks_above"] = run.clip(upper=30)
+    f["dollar_vol"] = (c * v).rolling(10).mean()
+    return f
+
+
+def classify(r):
+    """한 주(row)의 지표 → 단계·라벨. r은 dict 또는 Series"""
+    ma, close, slope, prior = r["ma30"], r["close"], r["slope"], r["prior"]
+    if pd.isna(ma) or pd.isna(slope):
+        return None
+    prior = 0.0 if pd.isna(prior) else prior
+    above = close > ma
+    flat = CFG["flat_pct"]
+    near_below = (not above) and close >= ma * 0.97
+    bottom = ma < r["ma_peak"] * 0.85 or prior < -3
+    if (r["crosses"] or 0) >= CFG["whipsaw"] and abs(slope) < 2 * flat:
+        st = 1 if bottom else 3
+    elif slope > flat and (above or near_below):
+        st = 2
+    elif slope < -flat and not above:
+        st = 4
+    else:
+        # 평평한 30주선: 이전 고점보다 한참 아래(하락 후 바닥)면 1단계, 고점 근처면 3단계
+        st = 1 if bottom else 3
+    brk = not pd.isna(r["brk_week"])
+    ext = r["ext"]
+    label = {1: "1단계", 2: "2단계", 3: "3단계", 4: "4단계"}[st]
+    if st == 1 and brk and above and slope >= -flat:
+        st, label = 2, "1단계→2단계 돌파"
+    elif st == 1 and close >= r["res"] * 0.95:
+        label = "1단계 후반 (저항 근접)"
+    elif st == 2 and ext >= CFG["overheat_pct"]:
+        label = "2단계 (과열)"
+    elif st == 2 and brk:
+        label = "2단계 돌파"
+    elif st == 2 and not above:
+        label = "2단계 (30주선 시험)"
+    elif st == 2 and r["weeks_above"] <= 12:
+        label = "2단계 초기"
+    elif st == 3 and above:
+        label = "3단계 가능성 (30주선 평평)"
+    return st, label
+
+
+def row_dict(r):
+    d = {k: (None if (not isinstance(v, (bool, np.bool_)) and pd.isna(v)) else (float(v) if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, (bool, np.bool_)) else v))
+         for k, v in r.items()}
+    d["brk_week"] = int(d["brk_week"]) if d.get("brk_week") else None
+    d["base_depth"] = (d["res"] - d["base_low"]) / d["res"] * 100 if d.get("res") and d.get("base_low") else 0
+    return d
+
+
+def stage_of(df):
+    """마지막 주의 와인스테인 단계(1~4)와 지표들"""
+    f = indicators(df)
+    if f["ma30"].dropna().shape[0] < 30:
+        return None
+    r = f.iloc[-1]
+    cl = classify(r)
+    if cl is None:
+        return None
+    out = row_dict(r)
+    out["stage"], out["stage_label"] = cl
+    out["ma_series"] = f["ma30"]
+    return out
+
+
+def mansfield_series(c, b):
+    b = b.reindex(c.index, method="ffill")
+    rs = c / b
+    return (rs / rs.rolling(52).mean() - 1) * 100
+
+
+def mansfield(c, b):
+    j = pd.concat([c, b], axis=1, join="inner").dropna()
+    if len(j) < 60:
+        return None, None
+    rs = j.iloc[:, 0] / j.iloc[:, 1]
+    m = (rs / rs.rolling(52).mean() - 1) * 100
+    return float(m.iloc[-1]), float(m.iloc[-5])
+
+
+def grade_from(points, maxp):
+    return int(min(9, max(1, 9 - round(points / maxp * 8))))
+
+
+def score_stock(s, mkt_stage, sec_stage, sec_rs):
+    # 시장 10
+    p_mkt = {2: 10, 1: 6, 3: 3, 4: 0}.get(mkt_stage, 5)
+    # 업종 25
+    if sec_stage is None:
+        p_sec = 0
+    else:
+        p_sec = {2: 15, 1: 10, 3: 4, 4: 0}[sec_stage]
+        if sec_rs is not None and sec_stage in (1, 2):
+            p_sec += 10 if sec_rs > 5 else 7 if sec_rs > 0 else 3 if sec_rs > -5 else 0
+    # 종목 위치 25
+    st = s["stage"]
+    p_st = 14 if st == 2 else 9 if st == 1 else 2
+    if s["brk_week"]:
+        p_st += 5
+    if s["close"] >= s["hi_all"] * 0.98:
+        p_st += 4                       # 신고가권: 위쪽 매물 없음
+    elif s["hi_all"] <= s["close"] * 1.10:
+        p_st -= 2                       # 10% 위에 과거 고점
+    if s["ext"] > CFG["overheat_pct"]:
+        p_st -= 6
+    elif s["ext"] <= 10 and st == 2:
+        p_st += 2
+    if st == 1 and s["close"] >= s["res"] * 0.95:
+        p_st += 3                       # 저항 근접 베이스
+    p_st = max(0, min(25, p_st))
+    # 거래량 15
+    vr = s["brk_vr"] if s["brk_week"] else s["vr"]
+    p_v = 10 if vr >= 3 else 8 if vr >= 2 else 5 if vr >= 1.5 else 3 if vr >= 1 else 1
+    p_v += 5 if s["updn"] >= 1.5 else 3 if s["updn"] >= 1.1 else 1 if s["updn"] >= 0.9 else 0
+    p_v = min(15, p_v)
+    # RS 15
+    rs, rs4 = s["rs"], s["rs4"]
+    if rs is not None and rs4 is None:
+        rs4 = rs
+    if rs is None:
+        p_rs = 5
+    elif rs > 0 and rs4 is not None and rs4 <= 0:
+        p_rs = 13                       # 0선 상향 돌파
+    elif rs > 10 and rs >= rs4:
+        p_rs = 15
+    elif rs > 0 and rs >= rs4:
+        p_rs = 12
+    elif rs > 0:
+        p_rs = 8
+    elif rs4 is not None and rs > rs4:
+        p_rs = 6
+    else:
+        p_rs = 2
+    # 손절/위험 10
+    sp = abs(s["stop_pct"])
+    p_risk = 10 if sp <= 8 else 8 if sp <= 12 else 6 if sp <= 15 else 3 if sp <= 20 else 1
+    raw = p_mkt + p_sec + p_st + p_v + p_rs + p_risk
+    total, caps = raw, []
+    if st in (3, 4):
+        total = min(total, 30); caps.append(f"종목 {st}단계 상한 30")
+    if sec_stage == 4:
+        total = min(total, 40); caps.append("업종 4단계 상한 40")
+    if mkt_stage == 4:
+        total = min(total, 50); caps.append("시장 4단계 상한 50")
+    elif mkt_stage == 3:
+        total -= 10; caps.append("시장 3단계 -10")
+    bd = dict(market=p_mkt, sector=p_sec, stock=p_st, volume=p_v, rs=p_rs, risk=p_risk)
+    return int(max(0, total)), bd, caps
+
+
+def signal_of(s):
+    st, c = s["stage"], s["close"]
+    if st == 2 and s["brk_week"] and (s["brk_vr"] or 0) >= 1.5 and s["ext"] < CFG["overheat_pct"]:
+        return "돌파"
+    if st == 2 and s["slope"] > 0 and (-3 <= s["ext"] <= 5 or (s["brk_level"] and abs(c / s["brk_level"] - 1) <= 0.03)):
+        return "풀백"
+    if st == 1 and c >= s["res"] * 0.95 and s["rs"] is not None and s["rs4"] is not None and s["rs"] > s["rs4"]:
+        return "베이스 대기"
+    return ""
+
+
+# ---------------- 리포트 ----------------
+def spark(df, ma, w=150, h=40, n=60):
+    c = df["Close"].iloc[-n:]
+    m = ma.iloc[-n:]
+    lo, hi = float(min(c.min(), m.min())), float(max(c.max(), m.max()))
+    if hi <= lo:
+        return ""
+    def pts(s):
+        xs = np.linspace(2, w - 2, len(s))
+        return " ".join(f"{x:.1f},{h - 2 - (float(y) - lo) / (hi - lo) * (h - 4):.1f}"
+                        for x, y in zip(xs, s) if not math.isnan(y))
+    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+            f'<polyline points="{pts(m)}" fill="none" stroke="#8b5cf6" stroke-width="1.5"/>'
+            f'<polyline points="{pts(c)}" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>')
+
+
+def fmt(x, d=2):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "–"
+    return f"{x:,.{d}f}"
+
+
+def write_report(day, mk, sectors, rows, dfs):
+    os.makedirs(OUT, exist_ok=True)
+    e = html.escape
+    def stage_pill(n, label=None):
+        return f'<span class="p s{n}">{e(label or f"{n}단계")}</span>'
+    css = """
+    :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--a:#b0741a;--r:#b13a3a;--b:#4f6d84}
+    @media(prefers-color-scheme:dark){:root{--bg:#111614;--card:#19211d;--fg:#e4ebe7;--mut:#93a19a;--line:#2a3530;--g:#5fcf93;--a:#e5b45c;--r:#ef7f7f;--b:#8fb0c6}}
+    body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;margin:0}
+    .w{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+    h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px}
+    .mut{color:var(--mut)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+    .tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}
+    table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+    th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+    th{font-size:12px;color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
+    td.l,th.l{text-align:left}tr:last-child td{border-bottom:0}
+    .p{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:99px}
+    .s1{color:var(--b);background:color-mix(in srgb,var(--b) 15%,transparent)}.s2{color:var(--g);background:color-mix(in srgb,var(--g) 15%,transparent)}
+    .s3{color:var(--a);background:color-mix(in srgb,var(--a) 15%,transparent)}.s4{color:var(--r);background:color-mix(in srgb,var(--r) 15%,transparent)}
+    .sc{font-weight:800;font-size:15px}.hi{color:var(--g)}.mid{color:var(--a)}.lo{color:var(--mut)}
+    .warn{color:var(--r);font-weight:700}svg{color:var(--fg);vertical-align:middle}
+    """
+    def sc_cls(x):
+        return "hi" if x >= 80 else "mid" if x >= 65 else "lo"
+    parts = [f"<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+             f"<title>와인스테인 스크리너 {day}</title><style>{css}</style><div class='w'>",
+             f"<h1>와인스테인 스크리너</h1><div class='mut'>기준: {day} 주봉 · {len(dfs)}종목 계산 · "
+             f"보라선=30주선 · 점수는 기준 부합도이며 수익 보장이 아닙니다.</div>"]
+    if dt.date.today().weekday() < 5:
+        parts.append("<div class='card warn' style='margin-top:8px'>평일에 실행해서 이번 주 주봉이 아직 확정되지 않았습니다. "
+                     "와인스테인 판단은 주봉 종가 기준이니 토요일(한국 시간)에 다시 돌려 확인하세요.</div>")
+    mtxt = " · ".join(f"{MARKET[k]} {stage_pill(v['stage'], v['stage_label'])}" for k, v in mk.items() if v)
+    warn = any(v and v["stage"] == 4 for v in mk.values())
+    parts.append(f"<h2>시장</h2><div class='card'>{mtxt}"
+                 f"{'<div class=warn>시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>' if warn else ''}</div>")
+    # 업종
+    parts.append("<h2>업종 단계 (업종이 종목만큼 중요합니다)</h2><div class='tw'><table><tr>"
+                 "<th class=l>업종</th><th class=l>ETF</th><th class=l>단계</th><th>30주선 대비</th><th>30주선 10주 기울기</th><th>RS</th><th class=l>최근 60주</th></tr>")
+    order = {2: 0, 1: 1, 3: 2, 4: 3}
+    for t, v in sorted(sectors.items(), key=lambda kv: (order[kv[1]["stage"]], -(kv[1]["rs"] or -99))):
+        parts.append(f"<tr><td class=l>{e(v['name'])}</td><td class=l>{t}</td><td class=l>{stage_pill(v['stage'], v['stage_label'])}</td>"
+                     f"<td>{fmt(v['ext'],1)}%</td><td>{fmt(v['slope'],1)}%</td><td>{fmt(v['rs'],1)}</td><td class=l>{spark(dfs[t], v['ma_series'])}</td></tr>")
+    parts.append("</table></div>")
+    # 신호별 후보
+    heads = ("<tr><th class=l>티커</th><th class=l>종목</th><th class=l>업종</th><th>점수</th><th class=l>단계</th><th>종가</th>"
+             "<th>매수 스톱</th><th>풀백 구간</th><th>손절</th><th>손절폭</th><th>30주선 대비</th><th>거래량</th><th>RS</th><th class=l>최근 60주</th></tr>")
+    for sig, desc in [("돌파", "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파"),
+                      ("풀백", "2단계 중 30주선 근처(-3~+5%) 또는 돌파 지점(±3%)으로 되돌림"),
+                      ("베이스 대기", "1단계 베이스 상단 5% 이내, RS 개선 중")]:
+        rs_ = [r for r in rows if r["signal"] == sig]
+        parts.append(f"<h2>{sig} 후보 {len(rs_)}종목</h2><div class='mut' style='margin-bottom:6px'>{desc} · 점수 순</div>")
+        if not rs_:
+            parts.append("<div class='card mut'>해당 종목 없음</div>")
+            continue
+        parts.append(f"<div class='tw'><table>{heads}")
+        for r in rs_[:60]:
+            pz = f"{fmt(r['ma30'])}~{fmt(max(r['ma30']*1.05, r['brk_level'] or 0))}" if r["stage"] == 2 else "–"
+            parts.append(
+                f"<tr><td class=l><b>{e(r['ticker'])}</b></td><td class=l>{e(str(r['name'])[:24])}</td><td class=l>{e(r['sector_ko'] or '–')}</td>"
+                f"<td class='sc {sc_cls(r['score'])}'>{r['score']}</td><td class=l>{stage_pill(r['stage'], r['stage_label'])}</td>"
+                f"<td>{fmt(r['close'])}</td><td>{fmt(r['buy_stop']) if r['buy_stop'] and r['close'] < r['buy_stop'] else '돌파함'}</td><td>{pz}</td>"
+                f"<td>{fmt(r['stop'])}</td><td class='{'warn' if abs(r['stop_pct'])>CFG['stop_risk_pct'] else ''}'>{fmt(r['stop_pct'],1)}%</td>"
+                f"<td class='{'warn' if r['ext']>=CFG['overheat_pct'] else ''}'>{fmt(r['ext'],1)}%</td>"
+                f"<td>{r['volGrade']}등급</td><td>{r['rsGrade']}등급</td><td class=l>{spark(dfs[r['ticker']], r['ma_series'])}</td></tr>")
+        parts.append("</table></div>")
+    parts.append("<p class='mut' style='margin-top:24px'>자동 계산은 차트 판독 대신 규칙을 기계적으로 적용한 것입니다. "
+                 "매수 전에는 후보 종목의 주봉·일봉 차트를 프로젝트에 보내 최종 확인하세요.</p></div>")
+    path = os.path.join(OUT, f"report_{day}.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(parts))
+    return path
+
+
+# ---------------- 메인 ----------------
+def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
+    """데이터 받기 + 시장·업종·종목 계산 (리포트·앱 공통)"""
+    day = dt.date.today().isoformat()
+    uni = universe or load_universe(quick)
+    etfs = list(SECTOR_ETF.values()) + list(INDUSTRY_ETF)
+    need = list(uni) + etfs + list(MARKET) + list(BENCH.values()) + list(extra)
+    print(f"총 {len(need)}개 주봉 데이터를 받습니다 (몇 분 걸릴 수 있어요)")
+    dfs = fetch(need)
+    bench = {k: dfs[v]["Close"] for k, v in BENCH.items() if v in dfs}
+    # 시장
+    mk = {}
+    for t in MARKET:
+        mk[t] = stage_of(dfs[t]) if t in dfs else None
+    mkt_stage = (mk.get("^GSPC") or mk.get("^IXIC") or {}).get("stage")
+    worst = max([v["stage"] for v in mk.values() if v] or [2], key=lambda s: {4: 3, 3: 2, 1: 1, 2: 0}[s])
+    # 업종 ETF
+    sectors = {}
+    names = {**{v: SECTOR_KO[k] + " (섹터)" for k, v in SECTOR_ETF.items()}, **INDUSTRY_ETF}
+    for t in etfs:
+        if t in dfs:
+            s = stage_of(dfs[t])
+            if s:
+                s["rs"], s["rs4"] = mansfield(dfs[t]["Close"], bench["us"]) if "us" in bench else (None, None)
+                s["name"] = names[t]
+                sectors[t] = s
+    rows = []
+    for t, info in uni.items():
+        df = dfs.get(t)
+        if df is None:
+            continue
+        if df["Close"].iloc[-1] < CFG["min_price"] and info["bench"] == "us":
+            continue
+        if info["bench"] == "us" and (df["Close"] * df["Volume"]).iloc[-10:].mean() < CFG["min_dollar_vol"]:
+            continue
+        s = stage_of(df)
+        if not s:
+            continue
+        b = bench.get(info["bench"])
+        s["rs"], s["rs4"] = mansfield(df["Close"], b) if b is not None else (None, None)
+        etf = SECTOR_ETF.get(info.get("sector") or "")
+        sec = sectors.get(etf) if etf else None
+        m_stage = worst if info["bench"] == "us" else None
+        score, bd, caps = score_stock(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None)
+        s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps,
+                 sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),
+                 sector_etf=etf, sector_stage=sec["stage"] if sec else None,
+                 volGrade=grade_from(bd["volume"], 15), rsGrade=grade_from(bd["rs"], 15),
+                 buy_stop=round(s["res"] * 1.005, 2) if s["close"] <= s["res"]
+                 else round(s["brk_level"] * 1.005, 2) if s["brk_level"] else None)
+        s["signal"] = signal_of(s)
+        rows.append(s)
+    rows.sort(key=lambda r: -r["score"])
+    return dict(day=day, mk=mk, sectors=sectors, rows=rows, dfs=dfs, uni=uni, bench=bench, worst=worst)
+
+
+def run(quick=False, fetch=fetch_weekly, universe=None):
+    R = compute(quick, fetch, universe)
+    day, mk, sectors, rows, dfs = R["day"], R["mk"], R["sectors"], R["rows"], R["dfs"]
+    rep = write_report(day, mk, sectors, rows, dfs)
+    # CSV
+    keep = ["ticker", "name", "sector_ko", "sector_etf", "sector_stage", "score", "signal", "stage", "stage_label",
+            "close", "ma30", "slope", "ext", "res", "buy_stop", "stop", "stop_pct", "vr", "updn", "rs", "rs4",
+            "volGrade", "rsGrade"]
+    csv = os.path.join(OUT, f"results_{day}.csv")
+    pd.DataFrame([{k: r.get(k) for k in keep} for r in rows]).to_csv(csv, index=False, encoding="utf-8-sig")
+    # 보드 가져오기용 JSON (신호 종목 + 65점 이상)
+    board = []
+    for r in rows:
+        if not r["signal"] and r["score"] < 65:
+            continue
+        board.append(dict(
+            ticker=r["ticker"], name=str(r["name"]), sector=r["sector_ko"] or "업종 미지정", date=day,
+            stage=r["stage"], stageLabel=r["stage_label"], score=r["score"], price=round(r["close"], 2), priceDate=day,
+            buyStop=r["buy_stop"], pullbackZone=(f"{r['ma30']:.2f}~{max(r['ma30']*1.05, r['brk_level'] or 0):.2f}" if r["stage"] == 2 else None),
+            stop=round(r["stop"], 2), extension=f"{r['ext']:+.0f}%", buyType=r["signal"] or "관찰",
+            volGrade=r["volGrade"], rsGrade=r["rsGrade"], breakdown=r["breakdown"],
+            capNote=", ".join(r["caps"]) or None, source="screener"))
+    js = os.path.join(OUT, f"board_import_{day}.json")
+    with open(js, "w", encoding="utf-8") as f:
+        json.dump(board, f, ensure_ascii=False, indent=1)
+    n = {k: sum(1 for r in rows if r["signal"] == k) for k in ("돌파", "풀백", "베이스 대기")}
+    print(f"\n완료: {len(rows)}종목 계산 · 돌파 {n['돌파']} · 풀백 {n['풀백']} · 베이스 대기 {n['베이스 대기']}")
+    print("리포트:", rep)
+    return rep, rows
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quick", action="store_true", help="나스닥100 + 내 종목만")
+    ap.add_argument("--no-open", action="store_true")
+    a = ap.parse_args()
+    rep, _ = run(quick=a.quick)
+    if not a.no_open:
+        import webbrowser
+        webbrowser.open("file://" + os.path.abspath(rep))
