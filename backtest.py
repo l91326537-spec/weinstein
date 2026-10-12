@@ -91,12 +91,13 @@ def build_frames(dfs, uni):
                 sc2 = min(100, sc2 + round(BT["no_sector_pts"] * 0.8))
             scores2.append(sc2 if ok else np.nan)
             sigs2.append(g2 if ok else "")
-            q = S.quality_adj(d)
-            qL.append(q["late"]); qB.append(q["base"]); qP.append(q["pinned"])
+            q = S.quality_adj(d, g2)
+            qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
-        for name, a in (("L", L), ("B", B), ("LB", L + B), ("P", 0 * L)):
+        Bp = np.where(B > 0, 4, np.where(B < 0, -8, 0))
+        for name, a in (("P", 0 * L), ("L15", -15 * L), ("L8", -8 * L), ("BB", Bp), ("L8BB", -8 * L + Bp)):
             v = np.clip(s2 + a, 0, 100)
             f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
@@ -658,13 +659,14 @@ def main(argv=None, fetch=None, universe=None):
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
     OUT = dict(out=True)
-    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "P", "L", "B", "LB")}
+    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "P", "L15", "L8", "BB", "L8BB")}
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
         ("지금 점수", 6, q, "v2 점수 그대로 (소형주 제외)", "", None),
         ("+ 인수합병 의심 제외", 6, q, "1년 안에 한 주 +12% 급등 뒤 8주 범위 7% 이내로 가격이 고정된 종목은 20점 상한", "P", None),
-        ("+ 2단계 후반 -15", 6, q, "인수합병 제외 + 30주선이 40주 넘게 오르거나 52주 최저 대비 +60% 넘으면 -15점", "L", None),
-        ("+ 기저 길이 가감점", 6, q, "인수합병 제외 + 최근 36주 안에 끝난 기저(범위 40%·30주선 ±10%)가 26주+면 +6, 15주+면 +3, 짧으면 -6", "B", None),
-        ("+ 후반 감점 + 기저 가감점", 6, q, "위 두 가지 모두", "LB", None),
+        ("+ 2단계 후반 -15", 6, q, "인수합병 제외 + 30주선이 40주 넘게 오르거나 52주 최저 대비 +60% 넘으면 -15점", "L15", None),
+        ("+ 2단계 후반 -8", 6, q, "같은 조건, 감점만 -8", "L8", None),
+        ("+ 돌파 기저 가감점", 6, q, "인수합병 제외 + 돌파 신호만: 기저 26주 이상이면 +4, 짧으면 -8", "BB", None),
+        ("+ 후반 -8 + 돌파 기저", 6, q, "위 두 가지 모두", "L8BB", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:

@@ -33,6 +33,9 @@ CFG = {
     "min_price": 5.0,        # 이 가격 미만 종목 제외
     "late_weeks": 40,        # 30주선이 이 주 수 넘게 계속 오르면 2단계 후반
     "late_rise": 60.0,       # 30주선이 52주 최저보다 이 % 넘게 오르면 2단계 후반
+    "late_pts": 8,           # 2단계 후반 감점
+    "base_bonus": 4,         # 기저 26주 이상 돌파 가점
+    "base_short": 8,         # 기저 26주 미만 돌파 감점
     "use_late": False,       # 2단계 후반 감점 (백테스트 결과로 결정)
     "use_base": False,       # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
@@ -344,8 +347,9 @@ def late_stage(r):
     return bool((w is not None and not pd.isna(w) and w >= CFG["late_weeks"]) or (rise is not None and not pd.isna(rise) and rise >= CFG["late_rise"]))
 
 
-def quality_adj(s):
-    """기저 품질·2단계 진행도 가감점과 인수합병 의심 여부. 반환: dict(late, base, pinned, notes)"""
+def quality_adj(s, signal=None):
+    """기저 품질·2단계 진행도 가감점과 인수합병 의심 여부. 반환: dict(late, base, pinned, notes)
+    백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
     out = dict(late=0, base=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
@@ -353,15 +357,14 @@ def quality_adj(s):
     if s.get("stage") != 2:
         return out
     if late_stage(s):
-        out["late"] = -15
-        out["notes"].append(f"2단계 후반 -15 (30주선 {int(s.get('ma_up_weeks') or 0)}주째 상승 · 52주 +{(s.get('ma_rise52') or 0):.0f}%)")
-    bl = s.get("base_len") or 0
-    if bl >= 26:
-        out["base"] = 6; out["notes"].append(f"기저 {int(bl)}주 +6")
-    elif bl >= 15:
-        out["base"] = 3; out["notes"].append(f"기저 {int(bl)}주 +3")
-    elif not out["late"]:
-        out["base"] = -6; out["notes"].append("최근 기저 짧음 -6")
+        out["late"] = -CFG["late_pts"]
+        out["notes"].append(f"2단계 후반 -{CFG['late_pts']} (30주선 {int(s.get('ma_up_weeks') or 0)}주째 상승 · 52주 +{(s.get('ma_rise52') or 0):.0f}%)")
+    if signal == "돌파":
+        bl = s.get("base_len") or 0
+        if bl >= 26:
+            out["base"] = CFG["base_bonus"]; out["notes"].append(f"기저 {int(bl)}주 돌파 +{CFG['base_bonus']}")
+        else:
+            out["base"] = -CFG["base_short"]; out["notes"].append(f"기저 짧은 돌파 ({int(bl)}주) -{CFG['base_short']}")
     return out
 
 
@@ -775,7 +778,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         m_stage = worst if info["bench"] == "us" else None
         sig2 = signal_v2(s)
         score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
-        q = quality_adj(s)
+        q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
         caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)]
         if q["pinned"]:
