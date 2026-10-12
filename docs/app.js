@@ -92,6 +92,16 @@ function holdStatus(td, h) {
 }
 
 /* ---------- 규칙 점검 (매수 기록 시) ---------- */
+/* 점수가 낮은 항목의 이유 (점수 구성 아래 한 줄) */
+function lowWhy(td) {
+  const bd = td.breakdown || {}, out = [], ext = td.ext;
+  if (bd.stock != null && bd.stock <= 3) out.push(td.stage !== 2 && td.stage !== 1 ? `진입 위치 ${bd.stock}: ${td.stage}단계라 매수 자리 아님` : num(ext) !== null && ext > 15 ? `진입 위치 ${bd.stock}: 30주선보다 ${Math.round(ext)}% 위라 너무 올라 있음 (돌파 직후나 30주선 근처가 아님)` : `진입 위치 ${bd.stock}: 돌파·풀백 자리가 아님`);
+  if (bd.risk != null && bd.risk <= 2) out.push(`손절폭 ${bd.risk}: 지금 사면 손절선(${fmt(td.stop)})까지 ${td.close && td.stop ? Math.round((1 - td.stop / td.close) * 100) : "?"}%나 떨어져야 해서 위험이 큼`);
+  if (bd.sector != null && bd.sector <= 3) out.push(`업종 ${bd.sector}: 업종 ETF가 ${td.sectorStage ?? "?"}단계`);
+  if (bd.volume != null && bd.volume <= 5) out.push(`거래량 ${bd.volume}: 오르는 주보다 내리는 주 거래량이 많음`);
+  if (bd.rs != null && bd.rs <= 3) out.push(`RS ${bd.rs}: 시장보다 약함`);
+  return out;
+}
 function ruleCheck(td) {
   const v = [];
   if (SUM && SUM.worst === 4) v.push("시장 4단계");
@@ -309,6 +319,7 @@ async function viewStock(v, t) {
   </section>
   <section class="card"><h3>점수 구성</h3>
     <div class="bars">${parts.map(([k, l, m]) => { const val = bd?.[k], wd = val == null ? 0 : Math.min(1, val / m) * 100, c = wd >= 75 ? "var(--s2)" : wd >= 50 ? "#5f8a2c" : wd >= 25 ? "var(--s3)" : "var(--s4)"; return `<div class="brow"><span>${l}</span><div class="track"><div class="fill" style="width:${wd}%;background:${c}"></div></div><span class="v"><b>${val ?? "–"}</b>/${m}</span></div>`; }).join("")}
+    ${lowWhy(td).length ? `<p class="note">낮은 항목: ${lowWhy(td).map(esc).join(" · ")}</p>` : ""}
     ${grade9("거래량", td.volGrade)}${grade9("RS", td.rsGrade)}</div>
     ${td.caps?.length ? `<p class="note">가감점·상한: ${td.caps.map(esc).join(", ")}</p>` : ""}
     <p class="note">자동 계산 점수입니다. 사기 전에 프로젝트에 차트를 보내 최종 확인하세요.</p>

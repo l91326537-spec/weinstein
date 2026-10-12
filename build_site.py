@@ -68,7 +68,7 @@ def buy_plan(r):
                     bkStop=r2((c if ok else b) * (1 - bs / 100)))
     # 잔고점 돌파: 30주선 우상향·30주선 위, 전고점(26주 고점)보다 5%+ 낮은 최근 8주 고점 바로 아래
     h8 = r.get("hi8")
-    if h8 and res and ma and r["stage"] == 2 and (r.get("slope") or 0) > S.CFG["flat_pct"] and c > ma and h8 < res * 0.95 and h8 * 0.93 <= c < h8:
+    if h8 and res and ma and r["stage"] == 2 and (r.get("slope") or 0) > S.CFG["flat_pct"] and c > ma and h8 < res * 0.95 and h8 * 0.93 <= c < h8 and (r.get("ext") or 0) <= 15:
         mb = h8 * 1.005
         plan.update(mhBuy=r2(mb), mhStop=r2(min(r.get("low3") * 0.99, mb * 0.97)) if r.get("low3") else r2(mb * 0.95), mhMajor=r2(res))
     small = r.get("cap") == "소형" and r.get("atr10")
