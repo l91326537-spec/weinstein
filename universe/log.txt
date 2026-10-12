@@ -1,0 +1,5 @@
+갱신 2026-10-12
+sp500: 503종목 저장
+ndx: 받지 못함 (ValueError: 표를 찾지 못함: 11행[0,1] / 2행[Category,All-Time Highs,All-Time Highs] / 41행[Year,Closing level,Change in Index in Points,Change in Index in %] / 31행[Milestone (closing),Date of Record (closing),Trading Days] / 3행[Milestone (closing),Date of Record (closing),Trading Days] / 1행[vteList of NASDAQ-100 companies,vteList of NASDAQ-100 companies.1] / 4행[vteNasdaq, Inc.,vteNasdaq, Inc..1,vteNasdaq, Inc..2] / 34행[vteStock market indices,vteStock market indices.1]) — 기존 목록 유지
+sp400: 400종목 저장
+r2000: 1979종목 저장
