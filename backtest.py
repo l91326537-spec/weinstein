@@ -729,13 +729,19 @@ def main(argv=None, fetch=None, universe=None):
     def at(col):
         return [frames[t][col].asof(d) for t, d in zip(allsig["ticker"], allsig["sig_date"])]
     allsig["upw"], allsig["rise"], allsig["bl"] = at("ma_up_weeks"), at("ma_rise52"), at("base_len")
+    allsig["up13"], allsig["mr13"], allsig["ihs"], allsig["hst"] = at("ma_up13"), at("min_rel13"), at("ihs"), at("hs_top")
+    pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
     for lab, m in [("[진행도] 30주선 상승 20주 이하", allsig["upw"] <= 20), ("[진행도] 21~39주", (allsig["upw"] > 20) & (allsig["upw"] < 40)),
                    ("[진행도] 40주 이상", allsig["upw"] >= 40), ("[진행도] 52주 +60% 이상", allsig["rise"] >= 60),
                    ("[진행도] 후반 아님", ~late), ("[진행도] 후반", late),
                    ("[기저] 15주 미만", allsig["bl"] < 15), ("[기저] 15~25주", (allsig["bl"] >= 15) & (allsig["bl"] < 26)), ("[기저] 26주 이상", allsig["bl"] >= 26),
                    ("[신호] 돌파 · 기저 26주+", (allsig["signal"] == "돌파") & (allsig["bl"] >= 26)), ("[신호] 돌파 · 기저 26주 미만", (allsig["signal"] == "돌파") & (allsig["bl"] < 26)),
-                   ("[신호] 풀백 · 후반", (allsig["signal"] == "풀백") & late), ("[신호] 풀백 · 후반 아님", (allsig["signal"] == "풀백") & ~late)]:
+                   ("[신호] 풀백 · 후반", (allsig["signal"] == "풀백") & late), ("[신호] 풀백 · 후반 아님", (allsig["signal"] == "풀백") & ~late),
+                   ("[추세] 풀백 · 30주선 13주 +3% 미만", pb & (allsig["up13"] < 3)), ("[추세] 풀백 · 30주선 13주 +3% 이상", pb & (allsig["up13"] >= 3)),
+                   ("[추세] 풀백 · 최근 13주 30주선 -3% 이탈", pb & (allsig["mr13"] < 0.97)), ("[추세] 풀백 · 이탈 없음", pb & (allsig["mr13"] >= 0.97)),
+                   ("[패턴] 돌파 · 역헤드앤숄더", bk & (allsig["ihs"] > 0)), ("[패턴] 돌파 · 그 외", bk & (allsig["ihs"] == 0)),
+                   ("[패턴] 헤드앤숄더 천장 뒤 신호", allsig["hst"] > 0), ("[패턴] 천장 패턴 없음", allsig["hst"] == 0)]:
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
