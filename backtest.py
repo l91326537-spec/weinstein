@@ -71,9 +71,10 @@ def build_frames(dfs, uni):
         else:
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
+        qL, qB, qP = [], [], []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -90,7 +91,14 @@ def build_frames(dfs, uni):
                 sc2 = min(100, sc2 + round(BT["no_sector_pts"] * 0.8))
             scores2.append(sc2 if ok else np.nan)
             sigs2.append(g2 if ok else "")
+            q = S.quality_adj(d)
+            qL.append(q["late"]); qB.append(q["base"]); qP.append(q["pinned"])
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
+        L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
+        s2 = f["score2"].values
+        for name, a in (("L", L), ("B", B), ("LB", L + B), ("P", 0 * L)):
+            v = np.clip(s2 + a, 0, 100)
+            f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
         if (i + 1) % 50 == 0:
             print(f"  {i + 1}/{len(uni)}")
@@ -218,7 +226,7 @@ def _bounce(f, i, quiet):
     return True
 
 
-def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None):
+def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2"):
     """small: 소형주 전용 규칙 dict(out=빼기, dv=주간 거래대금 하한, atr=ATR×2 손절, vol2=돌파 주 거래량 2배, sec2=업종 2단계만, nopb=풀백 제외)"""
     small = small or {}
     caps = caps or {}
@@ -232,7 +240,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
         sm = small if caps.get(t) == "소형" else {}
         if sm.get("out"):
             continue
-        sc, sg = f["score2"].values, f["signal2"].values
+        sc, sg = f[score_col].values, f["signal2"].values
         cprev = f["close"].shift(1)
         atr = pd.concat([f["high"] - f["low"], (f["high"] - cprev).abs(), (f["low"] - cprev).abs()], axis=1).max(axis=1).rolling(10).mean().values
         dvol, secst = f["dollar_vol"].values, f["sec_stage"].values
@@ -535,7 +543,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>소형주: 빼기 vs 거래대금 상위만</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 대형·중형주 규칙은 그대로 두고 표에 적힌 것만 바꿨어요. "
+        P.append("<h2>기저 길이 · 2단계 후반 · 인수합병 필터 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -634,7 +642,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("소형주 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("기저·2단계 후반 점수별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -649,24 +657,14 @@ def main(argv=None, fetch=None, universe=None):
     capmap = {t: v.get("cap") for t, v in uni.items()}
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
-    small_t = [t for t in frames if capmap.get(t) == "소형"]
-    rk = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
-    A = dict(atr=True, vol2=True)
-    sigs = {
-        "base": CV(),
-        "out": CV(small=dict(out=True)),
-        "t200": CV(small=dict(top=200, rk=rk)),
-        "t200a": CV(small=dict(top=200, rk=rk, **A)),
-        "t100a": CV(small=dict(top=100, rk=rk, **A)),
-        "alla": CV(small=dict(A)),
-    }
+    OUT = dict(out=True)
+    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "P", "L", "B", "LB")}
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("소형주도 같은 규칙", 6, q, "대·중·소형 모두 같은 규칙", "base", None),
-        ("소형주 빼기", 6, q, "러셀2000 종목은 사지 않음", "out", None),
-        ("소형주 거래대금 상위 200만", 6, q, "그 주 기준 소형주 중 최근 10주 거래대금 상위 200개만 (성장주·테마주가 주로 여기)", "t200", None),
-        ("상위 200 + ATR 손절 + 거래량 2배", 6, q, "위 + 소형주 손절은 ATR×2(수량 줄임), 돌파 주 거래량 평균 2배 미만이면 다음 주 매도", "t200a", None),
-        ("상위 100 + ATR 손절 + 거래량 2배", 6, q, "거래대금 상위 100개로 더 좁힘", "t100a", None),
-        ("소형주 전체 + ATR 손절 + 거래량 2배", 6, q, "순위 제한 없이 ATR 손절·거래량 2배만", "alla", None),
+        ("지금 점수", 6, q, "v2 점수 그대로 (소형주 제외)", "", None),
+        ("+ 인수합병 의심 제외", 6, q, "1년 안에 한 주 +12% 급등 뒤 8주 범위 7% 이내로 가격이 고정된 종목은 20점 상한", "P", None),
+        ("+ 2단계 후반 -15", 6, q, "인수합병 제외 + 30주선이 40주 넘게 오르거나 52주 최저 대비 +60% 넘으면 -15점", "L", None),
+        ("+ 기저 길이 가감점", 6, q, "인수합병 제외 + 최근 36주 안에 끝난 기저(범위 40%·30주선 ±10%)가 26주+면 +6, 15주+면 +3, 짧으면 -6", "B", None),
+        ("+ 후반 감점 + 기저 가감점", 6, q, "위 두 가지 모두", "LB", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:

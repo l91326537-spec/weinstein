@@ -31,6 +31,10 @@ CFG = {
     "stop_risk_pct": 15.0,   # 손절폭 이 % 초과면 위험
     "stop_lookback": 10,     # 손절 기준 저점을 찾을 기간(주)
     "min_price": 5.0,        # 이 가격 미만 종목 제외
+    "late_weeks": 40,        # 30주선이 이 주 수 넘게 계속 오르면 2단계 후반
+    "late_rise": 60.0,       # 30주선이 52주 최저보다 이 % 넘게 오르면 2단계 후반
+    "use_late": False,       # 2단계 후반 감점 (백테스트 결과로 결정)
+    "use_base": False,       # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
     "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
     "breakout_chase_pct": 7.0, # 돌파 지점보다 이 % 넘게 올라가 있으면 '돌파 매수'로 보지 않음 (추격 금지)
@@ -316,7 +320,55 @@ def indicators(df):
     f["dollar_vol"] = (c * v).rolling(10).mean()
     pc = c.shift(1)
     f["atr10"] = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1).rolling(10).mean()   # 주간 평균 변동폭
+    # 기저 길이: 주가 범위 40% 이내 + 30주선 변화 ±10% 이내로 버틴 가장 긴 구간(주). 최근 36주 안에 끝난 기저만 인정
+    bl = pd.Series(0.0, index=f.index)
+    for n in (10, 15, 20, 26, 39, 52, 78):
+        ok = (h.rolling(n).max() / l.rolling(n).min() <= 1.40) & ((ma / ma.shift(n - 1) - 1).abs() <= 0.10)
+        bl = bl.where(~ok, np.maximum(bl, n))
+    f["base_len"] = bl.rolling(36, min_periods=1).max()
+    # 2단계가 얼마나 오래·많이 진행됐나: 30주선이 연속 상승한 주 수, 52주 최저 30주선 대비 상승률
+    up = (f["slope"] > CFG["flat_pct"]).astype(int)
+    f["ma_up_weeks"] = up.groupby((up == 0).cumsum()).cumsum()
+    f["ma_rise52"] = (ma / ma.rolling(52, min_periods=20).min() - 1) * 100
+    # 인수합병 의심: 최근 1년 안에 한 주 +12% 이상 급등 후, 8주 범위 7% 이내·변동폭이 평소의 45% 이하로 '고정'
+    atrp = f["atr10"] / c
+    prev = atrp.shift(40).rolling(52, min_periods=20).median()       # 급등 전(약 1년 전) 평소 변동폭
+    jump = (c / c.shift(1) - 1).rolling(52, min_periods=1).max() >= 0.12
+    f["pinned"] = ((h.rolling(8).max() / l.rolling(8).min() - 1 <= 0.07) & (atrp <= 0.03) & (atrp <= prev * 0.45) & jump).astype(float)
     return f
+
+
+def late_stage(r):
+    """2단계 후반: 30주선이 40주 넘게 계속 오르거나, 52주 최저 30주선보다 60% 넘게 오름 → 3단계 위험이 커지는 구간"""
+    w, rise = r.get("ma_up_weeks"), r.get("ma_rise52")
+    return bool((w is not None and not pd.isna(w) and w >= CFG["late_weeks"]) or (rise is not None and not pd.isna(rise) and rise >= CFG["late_rise"]))
+
+
+def quality_adj(s):
+    """기저 품질·2단계 진행도 가감점과 인수합병 의심 여부. 반환: dict(late, base, pinned, notes)"""
+    out = dict(late=0, base=0, pinned=bool(s.get("pinned")), notes=[])
+    if out["pinned"]:
+        out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
+        return out
+    if s.get("stage") != 2:
+        return out
+    if late_stage(s):
+        out["late"] = -15
+        out["notes"].append(f"2단계 후반 -15 (30주선 {int(s.get('ma_up_weeks') or 0)}주째 상승 · 52주 +{(s.get('ma_rise52') or 0):.0f}%)")
+    bl = s.get("base_len") or 0
+    if bl >= 26:
+        out["base"] = 6; out["notes"].append(f"기저 {int(bl)}주 +6")
+    elif bl >= 15:
+        out["base"] = 3; out["notes"].append(f"기저 {int(bl)}주 +3")
+    elif not out["late"]:
+        out["base"] = -6; out["notes"].append("최근 기저 짧음 -6")
+    return out
+
+
+def apply_quality(score, q, use_late=True, use_base=True):
+    if q["pinned"]:
+        return min(score, 20)
+    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0))))
 
 
 def classify(r):
@@ -347,6 +399,8 @@ def classify(r):
         label = "1단계 후반 (저항 근접)"
     elif st == 2 and ext >= CFG["overheat_pct"]:
         label = "2단계 (과열)"
+    elif st == 2 and late_stage(r):
+        label = "2단계 후반"
     elif st == 2 and brk:
         label = "2단계 돌파"
     elif st == 2 and not above:
@@ -721,6 +775,11 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         m_stage = worst if info["bench"] == "us" else None
         sig2 = signal_v2(s)
         score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
+        q = quality_adj(s)
+        score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
+        caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)]
+        if q["pinned"]:
+            sig2 = ""
         s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100
         s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
                  sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),
