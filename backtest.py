@@ -72,9 +72,11 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
         qL, qB, qP, qT, qPt = [], [], [], [], []
+        ddv = f["dd52"].values
+        isb = []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -93,14 +95,18 @@ def build_frames(dfs, uni):
             sigs2.append(g2 if ok else "")
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
-            qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0))
+            qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
         Bp = np.where(B > 0, 4, np.where(B < 0, -8, 0))
         T, Pt = np.array(qT, float), np.array(qPt, float)
         base = -8 * L + Bp
-        for name, a in (("L8BB", base), ("T", base + T), ("Pt", base + Pt), ("TPt", base + T + Pt)):
+        dd = np.nan_to_num(ddv, nan=0.0)
+        ov = np.where(dd <= -25, -10, np.where(dd <= -15, -5, 0))
+        ovp = np.where(np.array(isb), 0, ov)
+        cur = base + T + Pt
+        for name, a in (("TPt", cur), ("OVp", cur + ovp), ("OV", cur + ov)):
             v = np.clip(s2 + a, 0, 100)
             f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
@@ -547,7 +553,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>30주선 추세 조건 · 헤드앤숄더 패턴 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
+        P.append("<h2>위쪽 매물 (52주 고점 대비 하락폭) 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -646,7 +652,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("추세 조건·패턴 점수별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("위쪽 매물 점수별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -662,13 +668,13 @@ def main(argv=None, fetch=None, universe=None):
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
     OUT = dict(out=True)
-    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "L8BB", "T", "Pt", "TPt")}
+    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("TPt", "OVp", "OV")}
+    sigs[""] = sigs["TPt"]
+    sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (위쪽 매물 분석용)
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("v2 기본 점수", 6, q, "가감점 없음 (소형주 제외)", "", None),
-        ("지금 앱 점수", 6, q, "인수합병 제외 · 2단계 후반 -8 · 돌파 기저 26주+ +4 / 짧으면 -8", "L8BB", None),
-        ("+ 풀백 추세 조건", 6, q, "풀백인데 30주선 13주 상승률 3% 미만이면 -8, 최근 13주 안에 종가가 30주선 -3% 아래로 갔으면 -10", "T", None),
-        ("+ 패턴", 6, q, "역헤드앤숄더 목선 돌파 +5, 헤드앤숄더 천장 완성 -10", "Pt", None),
-        ("+ 추세 조건 + 패턴", 6, q, "위 두 가지 모두", "TPt", None),
+        ("지금 앱 점수", 6, q, "인수합병 제외 · 2단계 후반 -8 · 돌파 기저 · 풀백 추세 조건 · 헤드앤숄더 천장 -10", "TPt", None),
+        ("+ 위쪽 매물 (풀백만)", 6, q, "풀백인데 52주 고점보다 15% 넘게 아래면 -5, 25% 넘게 아래면 -10", "OVp", None),
+        ("+ 위쪽 매물 (돌파·풀백)", 6, q, "돌파 신호에도 같은 감점", "OV", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:
@@ -724,12 +730,14 @@ def main(argv=None, fetch=None, universe=None):
     bins = [(50, 65, "50–64 관찰"), (65, 75, "65–74 조건부"), (75, 80, "75–79"), (80, 90, "80–89 적극"), (90, 101, "90+")]
     buckets = [(lab, stats_trades(clean[(clean["score"] >= a) & (clean["score"] < b)])) for a, b, lab in bins]
     # 2단계 진행도·기저 길이별 (모든 신호, 지금 점수 50점+)
-    allsig = sigs[""]
+    allsig = sig_inc
     allsig = allsig[~allsig["dup"]].copy()
     def at(col):
         return [frames[t][col].asof(d) for t, d in zip(allsig["ticker"], allsig["sig_date"])]
     allsig["upw"], allsig["rise"], allsig["bl"] = at("ma_up_weeks"), at("ma_rise52"), at("base_len")
     allsig["up13"], allsig["mr13"], allsig["ihs"], allsig["hst"] = at("ma_up13"), at("min_rel13"), at("ihs"), at("hs_top")
+    allsig["dd"] = at("dd52")
+    allsig["sm"] = allsig["ticker"].map(capmap) == "소형"
     pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
     for lab, m in [("[진행도] 30주선 상승 20주 이하", allsig["upw"] <= 20), ("[진행도] 21~39주", (allsig["upw"] > 20) & (allsig["upw"] < 40)),
@@ -741,7 +749,11 @@ def main(argv=None, fetch=None, universe=None):
                    ("[추세] 풀백 · 30주선 13주 +3% 미만", pb & (allsig["up13"] < 3)), ("[추세] 풀백 · 30주선 13주 +3% 이상", pb & (allsig["up13"] >= 3)),
                    ("[추세] 풀백 · 최근 13주 30주선 -3% 이탈", pb & (allsig["mr13"] < 0.97)), ("[추세] 풀백 · 이탈 없음", pb & (allsig["mr13"] >= 0.97)),
                    ("[패턴] 돌파 · 역헤드앤숄더", bk & (allsig["ihs"] > 0)), ("[패턴] 돌파 · 그 외", bk & (allsig["ihs"] == 0)),
-                   ("[패턴] 헤드앤숄더 천장 뒤 신호", allsig["hst"] > 0), ("[패턴] 천장 패턴 없음", allsig["hst"] == 0)]:
+                   ("[패턴] 헤드앤숄더 천장 뒤 신호", allsig["hst"] > 0), ("[패턴] 천장 패턴 없음", allsig["hst"] == 0)] + [
+                   (f"[매물] {nm} · 52주 고점 대비 {lab}", sel & (allsig["dd"] > lo) & (allsig["dd"] <= hi))
+                   for nm, sel in (("풀백", pb & ~allsig["sm"]), ("돌파", bk & ~allsig["sm"]), ("소형주 전체", allsig["sm"]), ("대·중형 전체", ~allsig["sm"]))
+                   for lab, lo, hi in (("0~-15%", -15, 1), ("-15~-25%", -25, -15), ("-25% 이하", -999, -25))] + [
+                   ("[매물] 소형주 중 -25% 이하 비율 → 신호 수만 비교", allsig["sm"] & (allsig["dd"] <= -25)), ("[매물] 대·중형 중 -25% 이하 → 신호 수만 비교", ~allsig["sm"] & (allsig["dd"] <= -25))]:
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
