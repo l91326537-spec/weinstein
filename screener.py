@@ -139,6 +139,18 @@ def _russell2000():
     return out
 
 
+def _nasdaq100_api():
+    import requests
+    r = requests.get("https://api.nasdaq.com/api/quote/list-type/nasdaq100",
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"}, timeout=30)
+    r.raise_for_status()
+    rows = r.json()["data"]["data"]["rows"]
+    out = [(str(x["symbol"]).replace(".", "-").strip(), str(x.get("companyName") or x["symbol"]), "") for x in rows]
+    if len(out) < 90:
+        raise ValueError(f"종목 수가 너무 적음 ({len(out)})")
+    return out
+
+
 def _first_ok(*fns):
     err = None
     for fn in fns:
@@ -151,8 +163,8 @@ def _first_ok(*fns):
 
 SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
     ("sp500", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 400)),
-    ("ndx", "대형", lambda: _first_ok(lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_Nasdaq-100_companies", 90),
-                                       lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90))),
+    ("ndx", "대형", lambda: _first_ok(lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90),
+                                       _nasdaq100_api)),
     ("sp400", "중형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 300)),
     ("r2000", "소형", _russell2000),
 ]
