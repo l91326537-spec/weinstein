@@ -467,7 +467,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
         P.append("<h2>남는 돈 채우기 비교 (현금 vs QQQ vs SPY)</h2><div class=mut style='margin-bottom:6px'>모두 같은 신호(v2 점수 · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백 · 4단계까지 보유 · 갈아타기 없음). 종목에 안 들어간 돈을 어떻게 둘지만 바꿨어요. 새 종목을 살 때는 ETF를 팔아 사고, ETF는 목표와 계좌의 10% 넘게 차이 날 때만 지난주 시장 단계를 보고 이번 주 시가에 맞춰요. 현금 이자는 0으로 계산. "
-                 f"아래 나머지 표는 연평균이 가장 높았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
+                 f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
             c_, t_ = r["c"], r["t"]
@@ -599,7 +599,7 @@ def main(argv=None, fetch=None, universe=None):
         print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 종목 {e_['stk'].mean():.0f}% · ETF {e_['etf'].mean():.0f}%")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
-    best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
+    best = max(comp, key=lambda r: (r["c"].get("mar") if pd.notna(r["c"].get("mar")) else -99))["name"]   # 연평균/최대낙폭이 가장 좋은 조합
     ver_b, smode_b, pct_b, ex_b, mp_b, fill_b = combos[best]
     EXIT.clear(); EXIT.update(EXITS[ex_b])
     STOP.clear(); STOP.update(mode=smode_b, pct=pct_b)
