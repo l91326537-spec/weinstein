@@ -85,23 +85,43 @@ def _wiki_index(url, min_rows):
     """위키피디아 지수 구성 종목 표 → [(ticker, name, gics_sector)]"""
     for t in _read_html(url):
         tcol = next((c for c in t.columns if str(c) in ("Symbol", "Ticker", "Ticker symbol")), None)
-        scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None)
+        scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None) \
+            or next((c for c in t.columns if "Industry" in str(c) and "Sub" not in str(c)), None)
         if tcol is None or scol is None or len(t) < min_rows:
             continue
         ncol = next((c for c in t.columns if str(c) in ("Security", "Company")), tcol)
-        return [(str(r[tcol]).replace(".", "-").strip(), str(r[ncol]), str(r[scol])) for _, r in t.iterrows()]
+        return [(str(r[tcol]).replace(".", "-").strip(), str(r[ncol]), ICB_TO_GICS.get(str(r[scol]).strip(), str(r[scol]).strip()))
+                for _, r in t.iterrows()]
     raise ValueError("표를 찾지 못함")
+
+
+ICB_TO_GICS = {  # 위키 나스닥100 표가 ICB 분류를 쓰는 경우 GICS 이름으로 맞춤
+    "Technology": "Information Technology", "Telecommunications": "Communication Services",
+    "Basic Materials": "Materials", "Health Care": "Health Care", "Consumer Discretionary": "Consumer Discretionary",
+    "Consumer Staples": "Consumer Staples", "Industrials": "Industrials", "Energy": "Energy",
+    "Utilities": "Utilities", "Real Estate": "Real Estate", "Financials": "Financials",
+}
 
 
 def _russell2000():
     """러셀 2000: iShares IWM 보유 종목 파일"""
     import csv, requests
-    url = ("https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax"
-           "?fileType=csv&fileName=IWM_holdings&dataType=fund")
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=60)
-    r.raise_for_status()
-    lines = r.text.splitlines()
-    k = next(i for i, l in enumerate(lines) if l.startswith("Ticker,"))
+    urls = ["https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/latest-holdings.csv",
+            "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax"
+            "?fileType=csv&fileName=IWM_holdings&dataType=fund"]
+    lines, k = None, None
+    for url in urls:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=60)
+            r.raise_for_status()
+            ls = r.text.lstrip("\ufeff").splitlines()
+            k = next(i for i, l in enumerate(ls) if l.startswith("Ticker,"))
+            lines = ls
+            break
+        except Exception as e:
+            print("   러셀2000 주소 실패:", url[:70], e)
+    if lines is None:
+        raise ValueError("러셀2000 보유 종목 파일을 받지 못함")
     fix = {"Communication": "Communication Services"}
     out = []
     for row in csv.DictReader(lines[k:]):
