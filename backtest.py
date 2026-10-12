@@ -719,6 +719,21 @@ def main(argv=None, fetch=None, universe=None):
     clean = sig[~sig["dup"]]
     bins = [(50, 65, "50–64 관찰"), (65, 75, "65–74 조건부"), (75, 80, "75–79"), (80, 90, "80–89 적극"), (90, 101, "90+")]
     buckets = [(lab, stats_trades(clean[(clean["score"] >= a) & (clean["score"] < b)])) for a, b, lab in bins]
+    # 2단계 진행도·기저 길이별 (모든 신호, 지금 점수 50점+)
+    allsig = sigs[""]
+    allsig = allsig[~allsig["dup"]].copy()
+    def at(col):
+        return [frames[t][col].asof(d) for t, d in zip(allsig["ticker"], allsig["sig_date"])]
+    allsig["upw"], allsig["rise"], allsig["bl"] = at("ma_up_weeks"), at("ma_rise52"), at("base_len")
+    late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
+    for lab, m in [("[진행도] 30주선 상승 20주 이하", allsig["upw"] <= 20), ("[진행도] 21~39주", (allsig["upw"] > 20) & (allsig["upw"] < 40)),
+                   ("[진행도] 40주 이상", allsig["upw"] >= 40), ("[진행도] 52주 +60% 이상", allsig["rise"] >= 60),
+                   ("[진행도] 후반 아님", ~late), ("[진행도] 후반", late),
+                   ("[기저] 15주 미만", allsig["bl"] < 15), ("[기저] 15~25주", (allsig["bl"] >= 15) & (allsig["bl"] < 26)), ("[기저] 26주 이상", allsig["bl"] >= 26),
+                   ("[신호] 돌파 · 기저 26주+", (allsig["signal"] == "돌파") & (allsig["bl"] >= 26)), ("[신호] 돌파 · 기저 26주 미만", (allsig["signal"] == "돌파") & (allsig["bl"] < 26)),
+                   ("[신호] 풀백 · 후반", (allsig["signal"] == "풀백") & late), ("[신호] 풀백 · 후반 아님", (allsig["signal"] == "풀백") & ~late)]:
+        buckets.append((lab, stats_trades(allsig[m])))
+        print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
     yearly = pd.DataFrame({k: v.resample("YE").last().pct_change() * 100 for k, v in curves.items()})
     first = {k: (v.resample("YE").last().iloc[0] / v.iloc[0] - 1) * 100 for k, v in curves.items()}
