@@ -83,7 +83,8 @@ def _read_html(url):
 
 def _wiki_index(url, min_rows):
     """위키피디아 지수 구성 종목 표 → [(ticker, name, gics_sector)]"""
-    for t in _read_html(url):
+    tables = _read_html(url)
+    for t in tables:
         if isinstance(t.columns, pd.MultiIndex):
             t.columns = [str(c[-1]) for c in t.columns]
         t.columns = [str(c).split("[")[0].strip() for c in t.columns]
@@ -95,7 +96,7 @@ def _wiki_index(url, min_rows):
         ncol = next((c for c in t.columns if str(c) in ("Security", "Company")), tcol)
         return [(str(r[tcol]).replace(".", "-").strip(), str(r[ncol]), ICB_TO_GICS.get(str(r[scol]).strip(), str(r[scol]).strip()))
                 for _, r in t.iterrows()]
-    raise ValueError("표를 찾지 못함")
+    raise ValueError("표를 찾지 못함: " + " / ".join(f"{len(t)}행[{','.join(map(str, t.columns))[:80]}]" for t in tables[:8]))
 
 
 ICB_TO_GICS = {  # 위키 나스닥100 표가 ICB 분류를 쓰는 경우 GICS 이름으로 맞춤
@@ -149,13 +150,17 @@ SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
 def refresh_universe():
     """종목 목록을 새로 받아 universe/*.csv로 저장 (GitHub에서 한 달에 한 번 실행)"""
     os.makedirs(UNI_DIR, exist_ok=True)
+    log = [f"갱신 {dt.date.today()}"]
     for key, cap, fn in SOURCES:
         try:
             rows = fn()
             pd.DataFrame(rows, columns=["ticker", "name", "sector"]).to_csv(os.path.join(UNI_DIR, key + ".csv"), index=False)
-            print(f"{key}: {len(rows)}종목 저장")
+            log.append(f"{key}: {len(rows)}종목 저장")
         except Exception as e:
-            print(f"{key}: 받지 못함 ({e}) — 기존 목록 유지")
+            log.append(f"{key}: 받지 못함 ({type(e).__name__}: {e}) — 기존 목록 유지")
+        print(log[-1])
+    with open(os.path.join(UNI_DIR, "log.txt"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(log) + "\n")
 
 
 def load_universe(quick=False):
