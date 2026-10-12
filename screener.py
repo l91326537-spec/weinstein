@@ -41,6 +41,7 @@ CFG = {
     "use_pattern": True,     # 역헤드앤숄더 돌파 가점·헤드앤숄더 천장 감점 (백테스트 결과로 결정)
     "use_overhead": False,   # 52주 고점 대비 많이 빠진 종목 감점 (백테스트 결과로 결정)
     "overhead_all": False,   # True면 돌파에도 적용, False면 풀백만
+    "b12_pts": 10,           # 1→2단계 돌파 가점 (먼저 사도록)
     "use_base": True,        # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
     "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
@@ -439,6 +440,17 @@ def quality_adj(s, signal=None):
         else:
             out["base"] = -CFG["base_short"]; out["notes"].append(f"기저 짧은 돌파 ({int(bl)}주) -{CFG['base_short']}")
     return out
+
+
+def signal_kind(s, signal):
+    """신호 세부 종류: 1→2 돌파 / 돌파(2단계 중간) / 30주선 풀백 / 돌파선 되돌림"""
+    if signal == "돌파":
+        lab = s.get("stage_label") or ""
+        is12 = lab.startswith("1단계→2단계") or ((s.get("base_len") or 0) >= 15 and (s.get("ma_up_weeks") or 99) <= 8)
+        return "1→2 돌파" if is12 else "돌파"
+    if signal == "풀백":
+        return "30주선 풀백" if -3 <= (s.get("ext") or 0) <= 5 else "돌파선 되돌림"
+    return signal or ""
 
 
 def apply_quality(score, q, use_late=True, use_base=True):
@@ -859,6 +871,11 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
                        or "30주선" in n or "헤드앤숄더" in n or "매물" in n]
         if q["pinned"]:
             sig2 = ""
+        kind = signal_kind(s, sig2)
+        if kind == "1→2 돌파" and CFG["b12_pts"] and not q["pinned"]:
+            score = min(100, score + CFG["b12_pts"])          # 백테스트: 1→2 돌파 1.61R vs 2단계 중간 돌파 1.37R, 포트폴리오도 가장 좋았음
+            caps = caps + [f"1→2단계 돌파 +{CFG['b12_pts']}"]
+        s["kind"] = kind
         s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100
         s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
                  sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),

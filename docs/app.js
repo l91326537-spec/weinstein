@@ -214,21 +214,22 @@ function planLines(c) {
 function candItem(c, rank) {
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
-    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.signal)}</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
+    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
     <span class="sub" style="display:grid;gap:2px">${planLines(c)}<span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급${c.brkVr ? ` · 돌파 주 거래량 <b>${fmt(c.brkVr, 1)}배</b>` : ""}</span></span></a>`;
 }
 
 /* ---------- 화면: 후보 ---------- */
-let candTab = "돌파", capTab = "대·중형";
+let candTab = "1→2 돌파", capTab = "대·중형";
 function viewCands(v) {
-  const tabs = ["돌파", "풀백", "베이스 대기", "65점+"];
+  const tabs = ["1→2 돌파", "돌파", "풀백", "베이스 대기", "65점+"];
+  const inTab = (c, t) => t === "65점+" ? c.score >= 65 : t === "1→2 돌파" ? c.kind === "1→2 돌파" : c.signal === t;
   /* 소형주(러셀2000)는 백테스트 성적이 나빠 기본 목록에서 빼고, '소형(참고)'·'내 종목'에서만 보여줌 */
   const capOk = c => capTab === "대·중형" ? c.cap !== "소형" : capTab === "소형(참고)" ? c.cap === "소형" : capTab === "내 종목" ? c.mine : c.cap === capTab;
-  const list = SUM.candidates.filter(c => capOk(c) && (candTab === "65점+" ? c.score >= 65 : c.signal === candTab)).sort((a, b) => b.score - a.score);
-  const desc = { "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선(-3~+5%)이나 돌파 지점(±3%)까지 되돌림", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
+  const list = SUM.candidates.filter(c => capOk(c) && inTab(c, candTab)).sort((a, b) => b.score - a.score);
+  const desc = { "1→2 돌파": "1단계 기저(15주+)에서 막 2단계로 넘어가는 돌파 · 와인스테인의 최우선 매수 자리 (+10점)", "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선 풀백(-3~+5%) 또는 돌파선 되돌림(±3%)", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
   v.innerHTML = `<h1>후보</h1>
-    <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && (t === "65점+" ? c.score >= 65 : c.signal === t)).length}</button>`).join("")}</div>
+    <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && inTab(c, t)).length}</button>`).join("")}</div>
     <div class="seg" role="group">${["대·중형", "대형", "중형", "소형(참고)", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
     ${capTab === "소형(참고)" ? `<div class="warn">소형주는 백테스트에서 승률 6%·평균 손실로 성적이 나빴어요. 참고만 하고, 산다면 돌파 주 거래량이 평균 2배 이상일 때만 · 손절은 ATR×2(수량은 자동으로 줄어요).</div>` : ""}
     <p class="note">${desc} · 점수 순${SUM.worst === 4 ? " · <b style='color:var(--s4)'>시장 4단계라 신규 매수 보류</b>" : ""}</p>
@@ -281,7 +282,7 @@ async function viewStock(v, t) {
   <section class="card">
     <div class="row between" style="align-items:flex-start;flex-wrap:nowrap">
       <div style="min-width:0"><h1 class="mono">${esc(td.t)}</h1><div class="muted" style="font-size:13px">${esc(td.name)}${td.sector ? " · " + esc(td.sector) : ""}</div>
-        <div class="row" style="margin-top:6px">${pill(td.stage, td.label)}${td.signal ? `<span class="pill st2">${esc(td.signal)}</span>` : ""}</div></div>
+        <div class="row" style="margin-top:6px">${pill(td.stage, td.label)}${td.signal ? `<span class="pill st2">${esc(td.kind || td.signal)}</span>` : ""}</div></div>
       ${td.score != null ? ring(td.score, 76) : ""}
     </div>
     <div class="row"><b class="mono" style="font-size:22px">${fmt(last[W.c])}</b>${sgn(prev ? (last[W.c] / prev[W.c] - 1) * 100 : null)}<span class="muted" style="font-size:12px">주간 · ${last[W.d]} 주</span></div>
