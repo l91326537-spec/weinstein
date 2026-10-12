@@ -202,7 +202,25 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check):
     return (f.index[j0], None, e, c[-1], (c[-1] - e) / risk, len(f) - 1 - j0, "보유 중", s0)
 
 
-def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50):
+def _bounce(f, i, quiet):
+    """30주선 부근 반등: 최근 3주 안에 30주선 +3% 이내까지 눌렸다가, 이번 주 거래량 늘며 양봉으로 반등 (지난주보다 높게 마감)"""
+    o, l, c, ma, vr, st, sl = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values, f["vr"].values, f["stage"].values, f["slope"].values
+    if i < 4 or st[i] != 2 or not (sl[i] > 0) or math.isnan(ma[i]):
+        return False
+    touch = min(l[i - 2:i + 1]) <= ma[i] * 1.03
+    held = min(c[i - 2:i + 1]) >= ma[i] * 0.97                     # 종가로 30주선을 크게 깨지 않음
+    up = c[i] > o[i] and c[i] > c[i - 1] and ma[i] < c[i] <= ma[i] * 1.08
+    vol = vr[i] >= 1.3 and vr[i] > vr[i - 1]
+    if not (touch and held and up and vol):
+        return False
+    if quiet and not (np.nanmean(vr[i - 3:i]) < 1.0):              # 눌리는 동안은 거래량이 줄었어야
+        return False
+    return True
+
+
+def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near"):
+    """pb_rule: 'near'(30주선 근처면 매수) | 'bounce'(근처에서 거래량 늘며 반등한 주 다음 주 시가) |
+       'quiet'(bounce + 눌림 동안 거래량 감소) | 'bstop'(bounce 주 고가 +0.5% 위로 올라갈 때 매수) | 'none'(풀백 안 함)"""
     """vol_rule: 'base'(돌파 1.5배) | 'strict'(돌파 2배·풀백은 거래량 감소)
        entry_rule: 'monday'(신호 다음 주 시가) | 'stop'(저항선 +0.5% 매수 스톱) | 'stopvol'(매수 스톱 + 그 주 거래량 2배 미만이면 다음 주 매도)"""
     pct = S.CFG["breakout_stop_pct"]
@@ -217,6 +235,29 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50):
             if not idx_ok[i] or not (sc[i] >= min_score_floor):
                 continue
             g = sg[i]
+            if pb_rule != "near":
+                if g == "풀백":
+                    g = ""
+                if pb_rule != "none" and _bounce(f, i, pb_rule == "quiet"):
+                    if i - last_entry > 4:
+                        e = o[i + 1]
+                        s0 = min(min(low3[i] * 0.99, ma[i] * 0.98), e * (1 - BT["min_stop_pct"] / 100))
+                        tr = None
+                        if pb_rule == "bstop":
+                            trig = h[i] * 1.005
+                            if h[i + 1] >= trig and o[i + 1] <= trig * 1.03:
+                                e = max(o[i + 1], trig)
+                                s0 = min(s0, e * (1 - BT["min_stop_pct"] / 100))
+                                if (e - s0) / e * 100 <= BT["max_stop_pct"]:
+                                    tr = _hold_from(f, i + 1, e, s0, True, None)
+                        elif e > s0 > 0 and (e - s0) / e * 100 <= BT["max_stop_pct"]:
+                            tr = _hold_from(f, i + 1, e, s0, False, None)
+                        if tr:
+                            last_entry = i
+                            ent, ex, e, px, R, wk, why, s0 = tr
+                            rows.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0,
+                                             R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, score=float(sc[i]),
+                                             signal="풀백", stage_label=f["stage_label"].iloc[i], dup=False))
             # 풀백: 신호 다음 주 시가 매수
             if g == "풀백":
                 if vol_rule == "strict" and not (vr[i] < 1.0):
@@ -466,7 +507,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>남는 돈 채우기 비교 (현금 vs QQQ vs SPY)</h2><div class=mut style='margin-bottom:6px'>모두 같은 신호(v2 점수 · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백 · 4단계까지 보유 · 갈아타기 없음). 종목에 안 들어간 돈을 어떻게 둘지만 바꿨어요. 새 종목을 살 때는 ETF를 팔아 사고, ETF는 목표와 계좌의 10% 넘게 차이 날 때만 지난주 시장 단계를 보고 이번 주 시가에 맞춰요. 현금 이자는 0으로 계산. "
+        P.append("<h2>풀백 매수 기준 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 4단계까지 보유. 풀백을 언제 사는지만 바꿨어요. 풀백 손절은 모두 최근 3주 저점 -1%와 30주선 -2% 중 낮은 쪽. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -565,7 +606,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("남는 돈 채우기 방식별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("풀백 매수 기준별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -576,27 +617,30 @@ def main(argv=None, fetch=None, universe=None):
             return "skip"
         x = dfs[etf]
         return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=10)
-    GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명)
-        ("6종목 · 남는 돈 현금", 6, None, "지금 방식. 종목에 안 들어간 돈은 현금"),
-        ("6종목 · 남는 돈 QQQ", 6, F("QQQ"), "남는 돈은 전부 QQQ, 시장 4단계면 QQQ 매도"),
-        ("6종목 · 남는 돈 SPY", 6, F("SPY"), "남는 돈은 전부 SPY, 시장 4단계면 SPY 매도"),
-        ("6종목 · 남는 돈 절반 QQQ", 6, F("QQQ", 0.5), "남는 돈의 절반은 QQQ, 절반은 현금, 시장 4단계면 QQQ 매도"),
-        ("6종목 · QQQ, 3단계 절반", 6, F("QQQ", 1.0, half3=True), "남는 돈은 QQQ, 시장 3단계면 절반으로, 4단계면 전부 매도"),
-        ("6종목 · QQQ, 시장 필터 없음", 6, F("QQQ", 1.0, filt=False), "남는 돈은 언제나 QQQ (시장 단계와 상관없이)"),
-        ("10종목 · 남는 돈 QQQ", 10, F("QQQ"), "10종목, 남는 돈은 QQQ, 시장 4단계면 QQQ 매도"),
+    q = F("QQQ")
+    sigs = {k: collect_variant(frames, start, "base", "stop", pb_rule=k) for k in ("near", "bounce", "quiet", "bstop", "none")}
+    GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호)
+        ("풀백: 30주선 근처면 매수 (지금)", 6, q, "주가가 30주선 -3%~+5% 안에 있으면 다음 주 시가 매수", "near"),
+        ("풀백: 거래량 늘며 반등 확인", 6, q, "최근 3주 안에 30주선 +3% 이내까지 눌린 뒤, 거래량이 평균 1.3배 이상·전주보다 늘며 양봉으로 반등한 주 → 다음 주 시가 매수", "bounce"),
+        ("풀백: 조용히 눌리고 거래량 반등", 6, q, "위 조건 + 눌리는 3주 동안 거래량이 평균보다 적었을 때만", "quiet"),
+        ("풀백: 반등 주 고가 돌파 시 매수", 6, q, "반등 확인 주의 고가 +0.5% 매수 스톱 (다음 주에 못 넘으면 안 삼)", "bstop"),
+        ("풀백 안 함 (돌파만)", 6, q, "돌파 매수만", "none"),
     ]
     comp, runs, combos = [], {}, {}
-    for name, mp_, fl, why in GRID:
+    for name, mp_, fl, why, sk in GRID:
         if fl == "skip":
-            continue
+            fl = None
+        base_sig = sigs[sk]
+        pbs = stats_trades(base_sig[(base_sig["signal"] == "풀백") & (base_sig["score"] >= args.min_score)])
         e_, t_ = run_portfolio(base_sig, frames, cal, args.min_score, max_pos=mp_, fill=fl)
         cs, ts = stats_curve(e_["equity"]), stats_trades(t_)
         desc = (f"{why} · 한 종목 최대 {min(BT['max_weight'], 100 / mp_):.0f}% · 평균 보유 {e_['n'].mean():.1f}종목 · "
-                f"평균 투자 비중: 종목 {e_['stk'].mean():.0f}% + ETF {e_['etf'].mean():.0f}% = {e_['stk'].mean() + e_['etf'].mean():.0f}%")
+                f"평균 투자 비중: 종목 {e_['stk'].mean():.0f}% + QQQ {e_['etf'].mean():.0f}%"
+                + (f" · 풀백 신호만 따로({args.min_score}점+, 전부 따라갔을 때): {pbs.get('n', 0)}개 · 승률 {f_(pbs.get('win'), 0)}% · 평균 {f_(pbs.get('avgR'))}R" if pbs.get("n") else ""))
         comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=None, loR=None))
         runs[name] = (base_sig, e_, t_)
         combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl)
-        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 종목 {e_['stk'].mean():.0f}% · ETF {e_['etf'].mean():.0f}%")
+        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 풀백 {pbs.get('n', 0)}개 {f_(pbs.get('avgR'))}R 승률 {f_(pbs.get('win'), 0)}%")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("mar") if pd.notna(r["c"].get("mar")) else -99))["name"]   # 연평균/최대낙폭이 가장 좋은 조합
