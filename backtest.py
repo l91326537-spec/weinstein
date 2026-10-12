@@ -91,6 +91,17 @@ def build_frames(dfs, uni):
     return frames, market
 
 
+# ---------------- 손절 규칙 후보 ----------------
+EXITS = {
+    "A 지금 규칙": dict(be_R=1, be_weeks=3, trail="low8ma", desc="1R 수익이나 3주 수익이면 본전 → 30주선·8주 저점 중 높은 쪽 아래로 추적"),
+    "B 30주선 추적": dict(be_R=None, be_weeks=None, trail="ma", desc="본전 이동 없음, 손절을 30주선 2% 아래로만 따라 올림"),
+    "C 30주선 종가 이탈": dict(be_R=None, be_weeks=None, trail="none", close_exit=True, desc="초기 손절 + 주봉 종가가 30주선 아래면 다음 주 매도"),
+    "D 2R 후 30주선": dict(be_R=2, be_weeks=None, trail="ma", trail_after_be=True, desc="2R 수익이 나면 본전, 그 뒤 30주선 2% 아래로 추적"),
+    "E 4단계까지 보유": dict(be_R=None, be_weeks=None, trail="none", desc="초기 손절만 두고, 종목이 4단계가 될 때까지 보유"),
+}
+EXIT = dict(EXITS["A 지금 규칙"])
+
+
 # ---------------- 거래 한 건 시뮬레이션 ----------------
 def simulate_trade(f, i):
     """i주 신호 → i+1주 시가 매수. (진입일, 청산일, 진입가, 청산가, R배수, 보유주, 청산사유, 초기손절) 또는 None"""
@@ -107,18 +118,24 @@ def simulate_trade(f, i):
     risk = e - s
     s0 = s
     be = False
+    X = EXIT
     j = i + 1
     while j < len(f):
         if lo[j] <= s:                                  # 손절 (갭 하락이면 시가)
             px = min(s, o[j])
             return (f.index[i + 1], f.index[j], e, px, (px - e) / risk, j - i - 1, "손절" if px < e else "추적 손절", s0)
         held = j - i
-        if not be and (c[j] >= e + risk or (held >= BT["be_weeks"] and c[j] > e)):
+        if not be and X.get("be_R") is not None and (c[j] >= e + X["be_R"] * risk or (X.get("be_weeks") and held >= X["be_weeks"] and c[j] > e)):
             be = True
             s = max(s, e * (1 + 2 * BT["cost_pct"] / 100))
-        if be:
-            trail = max(ma[j] if not math.isnan(ma[j]) else 0, low8[j] if not math.isnan(low8[j]) else 0) * 0.99
-            s = max(s, trail)
+        m = ma[j] if not math.isnan(ma[j]) else 0
+        if X["trail"] == "low8ma" and be:
+            s = max(s, max(m, low8[j] if not math.isnan(low8[j]) else 0) * 0.99)
+        elif X["trail"] == "ma" and (be or not X.get("trail_after_be")):
+            s = max(s, m * 0.98)
+        if X.get("close_exit") and m and c[j] < m and j + 1 < len(f):   # 주봉 종가 30주선 이탈
+            px = o[j + 1]
+            return (f.index[i + 1], f.index[j + 1], e, px, (px - e) / risk, j - i, "30주선 종가 이탈", s0)
         if stg[j] == 4 and j + 1 < len(f):           # 4단계 → 다음 주 시가 매도
             px = o[j + 1]
             return (f.index[i + 1], f.index[j + 1], e, px, (px - e) / risk, j - i, "4단계 진입", s0)
@@ -220,7 +237,7 @@ def f_(x, d=1, pct=False):
 
 
 def line_svg(series, w=1000, h=320):
-    cols = ["#1d7a4b", "#4f6d84", "#b0741a", "#8a8f8c"]
+    cols = ["#1d7a4b", "#4f6d84", "#b0741a", "#8e5cc8", "#c0433f", "#2a9db0", "#8a8f8c"]
     df = pd.concat(series.values(), axis=1, keys=series.keys()).dropna()
     if df.empty:
         return ""
@@ -248,7 +265,7 @@ def line_svg(series, w=1000, h=320):
     return "".join(parts) + f'<div class="leg">{leg}</div>'
 
 
-def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note):
+def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -274,6 +291,19 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          ("<a href='../' style='display:inline-block;margin-bottom:10px;font-weight:700;color:var(--g)'>← 스테이지 앱</a>" if getattr(args, "web", False) else "") +
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
+    if comp:
+        P.append("<h2>손절 규칙 비교</h2><div class=mut style='margin-bottom:6px'>매수 조건은 같고 파는 규칙만 다르게 해서 돌린 결과. "
+                 f"아래 나머지 표는 연평균이 가장 높았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
+                 "<div class=tw><table><tr><th class=l>손절 규칙</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
+        for r in comp:
+            c_, t_ = r["c"], r["t"]
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b>{' ★' if r['name'] == best else ''}<div class=mut style='font-size:12px;white-space:normal;min-width:220px'>{e(r['desc'])}</div></td>"
+                     f"<td>{sgn(c_.get('cagr'))}</td><td>{sgn(c_.get('mdd'))}</td><td>{t_.get('n', 0)}</td><td>{f_(t_.get('win'), 0, True)}</td>"
+                     f"<td>{f_(t_.get('avgR'), 2)}</td><td>{f_(t_.get('big'), 0, True)}</td><td>{f_(t_.get('weeks'), 0)}</td>"
+                     f"<td>{f_(r.get('hiR'), 2)}</td><td>{f_(r.get('loR'), 2)}</td></tr>")
+        P.append("</table></div>")
+        if exit_curves:
+            P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
     st = cstats["전략"]; tt = tstats
     P.append("<h2>한눈에</h2><div class=kp>"
              f"<div><span>연평균 수익률</span><b class=big>{sgn(st.get('cagr'))}</b></div>"
@@ -352,11 +382,25 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("신호 모으고 거래 따라가는 중...")
-    sig = collect_signals(frames, start)
-    if sig.empty:
+    print("손절 규칙별로 거래를 따라가는 중...")
+    comp, runs = [], {}
+    for name, X in EXITS.items():
+        EXIT.clear(); EXIT.update(X)
+        sg = collect_signals(frames, start)
+        if sg.empty:
+            continue
+        e_, t_ = run_portfolio(sg, frames, cal, args.min_score)
+        cs, ts = stats_curve(e_["equity"]), stats_trades(t_)
+        cl = sg[~sg["dup"]]
+        hi = stats_trades(cl[cl["score"] >= 75]); lo_ = stats_trades(cl[cl["score"] < 65])
+        comp.append(dict(name=name, desc=X["desc"], c=cs, t=ts, hiR=hi.get("avgR"), loR=lo_.get("avgR")))
+        runs[name] = (sg, e_, t_)
+        print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 거래 {ts.get('n', 0)}")
+    if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
-    eq, trades = run_portfolio(sig, frames, cal, args.min_score)
+    best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
+    EXIT.clear(); EXIT.update(EXITS[best])
+    sig, eq, trades = runs[best]
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -385,7 +429,11 @@ def main(argv=None, fetch=None, universe=None):
     os.makedirs(S.OUT, exist_ok=True)
     day = dt.date.today().isoformat()
     path = os.path.join(S.OUT, f"backtest_{day}.html")
-    write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note)
+    exit_curves = {r["name"]: runs[r["name"]][1]["equity"] for r in comp}
+    if "SPY" in curves:
+        exit_curves["SPY"] = curves["SPY"]
+    write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
+                 comp=comp, best=best, exit_curves=exit_curves)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
