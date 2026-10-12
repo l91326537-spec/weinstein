@@ -1,22 +1,17 @@
-yaml
-name: 데이터 갱신
-
+name: update-data
 on:
   schedule:
     - cron: "40 21 * * 1-5"
   workflow_dispatch:
   push:
     branches: [main]
-
 permissions:
   contents: read
   pages: write
   id-token: write
-
 concurrency:
   group: pages
   cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,7 +28,6 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
