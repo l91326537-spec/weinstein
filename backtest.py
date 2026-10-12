@@ -236,6 +236,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
         cprev = f["close"].shift(1)
         atr = pd.concat([f["high"] - f["low"], (f["high"] - cprev).abs(), (f["low"] - cprev).abs()], axis=1).max(axis=1).rolling(10).mean().values
         dvol, secst = f["dollar_vol"].values, f["sec_stage"].values
+        rk = sm["rk"][t].reindex(f.index).values if sm.get("top") and t in sm["rk"] else None
 
         def widen(s0, e, i):          # 소형주 ATR 손절: 기존 손절과 '매수가 - ATR×2' 중 낮은 쪽
             if sm.get("atr") and not math.isnan(atr[i]):
@@ -249,6 +250,8 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
             if not idx_ok[i] or not (sc[i] >= min_score_floor):
                 continue
             if sm.get("dv") and not (dvol[i] >= sm["dv"]):
+                continue
+            if sm.get("top") and not (rk is not None and rk[i] <= sm["top"]):     # 그 주 소형주 중 거래대금 순위 (지난 10주 평균)
                 continue
             if sm.get("sec2") and secst[i] != 2:
                 continue
@@ -532,7 +535,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>풀백 가산점 · 소형주 전용 규칙 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 대형·중형주 규칙은 그대로 두고 표에 적힌 것만 바꿨어요. "
+        P.append("<h2>소형주: 빼기 vs 거래대금 상위만</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파는 저항선 +0.5% 매수 스톱·손절 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 대형·중형주 규칙은 그대로 두고 표에 적힌 것만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -631,7 +634,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("풀백 가산점·소형주 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("소형주 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -646,25 +649,24 @@ def main(argv=None, fetch=None, universe=None):
     capmap = {t: v.get("cap") for t, v in uni.items()}
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
+    small_t = [t for t in frames if capmap.get(t) == "소형"]
+    rk = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
+    A = dict(atr=True, vol2=True)
     sigs = {
         "base": CV(),
-        "bonus": CV(pb_bonus=10),
         "out": CV(small=dict(out=True)),
-        "dv": CV(small=dict(dv=100e6)),
-        "atr": CV(small=dict(atr=True)),
-        "atr_v": CV(small=dict(atr=True, vol2=True)),
-        "atr_v_s": CV(small=dict(atr=True, vol2=True, sec2=True)),
-        "all": CV(small=dict(atr=True, vol2=True, sec2=True, nopb=True)),
+        "t200": CV(small=dict(top=200, rk=rk)),
+        "t200a": CV(small=dict(top=200, rk=rk, **A)),
+        "t100a": CV(small=dict(top=100, rk=rk, **A)),
+        "alla": CV(small=dict(A)),
     }
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("지금 방식", 6, q, "풀백은 30주선 근처면 매수, 대·중·소형 같은 규칙", "base", None),
-        ("풀백 거래량 반등 +10점", 6, q, "30주선 근처 풀백 중 거래량 늘며 반등한 주면 점수 +10 (먼저 사고, 70점 문턱도 넘기 쉬움)", "bonus", None),
+        ("소형주도 같은 규칙", 6, q, "대·중·소형 모두 같은 규칙", "base", None),
         ("소형주 빼기", 6, q, "러셀2000 종목은 사지 않음", "out", None),
-        ("소형주 거래대금 하루 2천만$+", 6, q, "소형주는 최근 10주 주간 거래대금 평균 1억 달러(하루 약 2천만 달러) 이상만", "dv", None),
-        ("소형주 ATR 손절", 6, q, "소형주는 손절을 '매수가 - 주간 평균 변동폭(ATR)×2'까지 넓히고 수량을 줄임 (손실은 계좌 1% 그대로)", "atr", None),
-        ("소형주 ATR + 거래량 2배", 6, q, "위 + 소형주 돌파는 매수한 주 거래량이 평균 2배 미만이면 다음 주 시가 매도", "atr_v", None),
-        ("소형주 ATR + 거래량 + 업종 2단계", 6, q, "위 + 소형주는 업종 ETF가 2단계일 때만", "atr_v_s", None),
-        ("소형주 규칙 전부", 6, q, "위 + 소형주 풀백 제외 + 소형주는 최대 2종목", "all", 2),
+        ("소형주 거래대금 상위 200만", 6, q, "그 주 기준 소형주 중 최근 10주 거래대금 상위 200개만 (성장주·테마주가 주로 여기)", "t200", None),
+        ("상위 200 + ATR 손절 + 거래량 2배", 6, q, "위 + 소형주 손절은 ATR×2(수량 줄임), 돌파 주 거래량 평균 2배 미만이면 다음 주 매도", "t200a", None),
+        ("상위 100 + ATR 손절 + 거래량 2배", 6, q, "거래대금 상위 100개로 더 좁힘", "t100a", None),
+        ("소형주 전체 + ATR 손절 + 거래량 2배", 6, q, "순위 제한 없이 ATR 손절·거래량 2배만", "alla", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:

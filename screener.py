@@ -314,6 +314,8 @@ def indicators(df):
     run = above.astype(int).groupby((~above).cumsum()).cumsum()
     f["weeks_above"] = run.clip(upper=30)
     f["dollar_vol"] = (c * v).rolling(10).mean()
+    pc = c.shift(1)
+    f["atr10"] = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1).rolling(10).mean()   # 주간 평균 변동폭
     return f
 
 

@@ -99,6 +99,7 @@ function ruleCheck(td) {
   if (td.stage !== 2) v.push("2단계 아님");
   if ([3, 4].includes(td.sectorStage)) v.push("업종 " + td.sectorStage + "단계");
   if (num(td.ext) !== null && td.ext >= 20) v.push("과열(이격 20%+)");
+  if (td.cap === "소형" && td.signal === "돌파" && !(td.brkVr >= 2)) v.push("소형주 돌파 거래량 2배 미만");
   return v;
 }
 
@@ -138,7 +139,8 @@ function drawChart(box, td, weeks) {
   const mp = w.map((r, i) => r[W.ma] == null ? null : `${x(i).toFixed(1)},${y(r[W.ma]).toFixed(1)}`).filter(Boolean).join(" ");
   if (mp) s += `<polyline points="${mp}" fill="none" stroke="var(--ma)" stroke-width="2.2"/>`;
   // 기준선(매수 스톱·손절)
-  const lines = [[td.buyStop, "var(--s2)", "매수"], [td.stop, "var(--s4)", "손절"]];
+  const pb = td.signal === "풀백" && td.pbStop;     /* 매수 계획 칸과 같은 값: 풀백이면 풀백 손절, 아니면 돌파 매수가·돌파 손절 */
+  const lines = [[pb ? null : (td.bkBuy || td.buyStop), "var(--s2)", "매수"], [pb ? td.pbStop : (td.bkStop || td.stop), "var(--s4)", "손절"]];
   for (const [v, c, lab] of lines) {
     if (num(v) === null || v < lo || v > hi) continue;
     s += `<line x1="2" x2="${plotW + 2}" y1="${y(v)}" y2="${y(v)}" stroke="${c}" stroke-dasharray="5 4" stroke-width="1.2"/><text x="6" y="${y(v) - 3}" font-size="10" font-weight="700" fill="${c}">${lab} ${fmt(v)}</text>`;
@@ -175,7 +177,7 @@ function drawChart(box, td, weeks) {
 async function viewHome(v) {
   const mk = SUM.market, worst = SUM.worst;
   const mrow = Object.entries(mk).filter(([, m]) => m).map(([t, m]) => `<div class="row between"><span>${esc(m.name)}</span><span class="row">${pill(m.stage, m.label)}<span class="mono muted" style="font-size:12px">30주선 ${pct(m.ext)}</span></span></div>`).join("");
-  const top = SUM.candidates.filter(c => c.signal).sort((a, b) => b.score - a.score).slice(0, 5);
+  const top = SUM.candidates.filter(c => c.signal && c.cap !== "소형").sort((a, b) => b.score - a.score).slice(0, 5);
   const secs = SUM.sectors;
   v.innerHTML = `
   <section class="card"><h3>시장</h3>${mrow}
@@ -218,15 +220,17 @@ function candItem(c, rank) {
 }
 
 /* ---------- 화면: 후보 ---------- */
-let candTab = "돌파", capTab = "전체";
+let candTab = "돌파", capTab = "대·중형";
 function viewCands(v) {
   const tabs = ["돌파", "풀백", "베이스 대기", "65점+"];
-  const capOk = c => capTab === "전체" || c.cap === capTab || (capTab === "내 종목" && c.mine);
+  /* 소형주(러셀2000)는 백테스트 성적이 나빠 기본 목록에서 빼고, '소형(참고)'·'내 종목'에서만 보여줌 */
+  const capOk = c => capTab === "대·중형" ? c.cap !== "소형" : capTab === "소형(참고)" ? c.cap === "소형" : capTab === "내 종목" ? c.mine : c.cap === capTab;
   const list = SUM.candidates.filter(c => capOk(c) && (candTab === "65점+" ? c.score >= 65 : c.signal === candTab)).sort((a, b) => b.score - a.score);
   const desc = { "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선(-3~+5%)이나 돌파 지점(±3%)까지 되돌림", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
   v.innerHTML = `<h1>후보</h1>
     <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && (t === "65점+" ? c.score >= 65 : c.signal === t)).length}</button>`).join("")}</div>
-    <div class="seg" role="group">${["전체", "대형", "중형", "소형", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
+    <div class="seg" role="group">${["대·중형", "대형", "중형", "소형(참고)", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
+    ${capTab === "소형(참고)" ? `<div class="warn">소형주는 백테스트에서 승률 6%·평균 손실로 성적이 나빴어요. 참고만 하고, 산다면 돌파 주 거래량이 평균 2배 이상일 때만 · 손절은 ATR×2(수량은 자동으로 줄어요).</div>` : ""}
     <p class="note">${desc} · 점수 순${SUM.worst === 4 ? " · <b style='color:var(--s4)'>시장 4단계라 신규 매수 보류</b>" : ""}</p>
     ${list.length ? `<div class="list">${list.map(c => candItem(c)).join("")}</div>` : `<div class="empty">해당 종목이 없습니다.</div>`}`;
   v.querySelectorAll("[data-ct]").forEach(b => b.onclick = () => { candTab = b.dataset.ct; viewCands(v); });
@@ -289,13 +293,14 @@ async function viewStock(v, t) {
     <div class="kv">
       <div><span>돌파 매수가</span><b style="color:var(--s2)">${td.bkBuy ? fmt(td.bkBuy) : "–"}</b><small>${td.bkStatus ? esc(td.bkStatus) : ""}</small></div>
       <div><span>추격 한도</span><b>${td.bkMax ? fmt(td.bkMax) : "–"}</b><small>이 위면 사지 않기</small></div>
-      <div><span>돌파 손절 (-5%)</span><b style="color:var(--s4)">${td.bkStop ? fmt(td.bkStop) : "–"}</b></div>
+      <div><span>돌파 손절 (${td.small ? "ATR×2" : "-5%"})</span><b style="color:var(--s4)">${td.bkStop ? fmt(td.bkStop) : "–"}</b></div>
       <div><span>풀백 매수 구간</span><b style="color:var(--s2)">${td.pbZone ? fmt(td.pbZone[0]) + "~<wbr>" + fmt(td.pbZone[1]) : "–"}</b><small>${td.pbNow ? "지금 구간 안" : "30주선~+5%"}</small></div>
-      <div><span>풀백 손절</span><b style="color:var(--s4)">${td.pbStop ? fmt(td.pbStop) : "–"}</b><small>${td.pbNow ? "3주 저점·30주선 아래" : "30주선 -3%"}</small></div>
+      <div><span>풀백 손절</span><b style="color:var(--s4)">${td.pbStop ? fmt(td.pbStop) : "–"}</b><small>${td.small ? "ATR×2까지 넓힘" : td.pbNow ? "3주 저점·30주선 아래" : "30주선 -3%"}</small></div>
       ${td.rtZone ? `<div><span>돌파 지점 되돌림</span><b style="color:var(--s2)">${fmt(td.rtZone[0])}~<wbr>${fmt(td.rtZone[1])}</b></div>` : ""}
       <div><span>30주선 이격</span><b style="${td.ext >= 20 ? "color:var(--s4)" : ""}">${pct(td.ext)}</b></div>
       <div><span>추천 수량 (${s.riskPct}% 위험)</span><b>${qty ? qty.toLocaleString() + "주" : "–"}</b><small>${qtyAmt ? "약 " + (qtyAmt / 10000).toFixed(0) + "만원" : ""}</small></div>
     </div>
+    ${td.small ? `<div class="warn">소형주: 백테스트에서 성적이 나빴던 그룹이에요. 돌파는 그 주 거래량이 평균 2배 이상일 때만${td.brkVr ? ` (지금 ${fmt(td.brkVr, 1)}배)` : ""}, 손절은 주간 평균 변동폭(${fmt(td.atr)})×2로 넓히고 수량을 줄였어요.</div>` : ""}
     <p class="note">추천 수량: ${isKRW(t) ? "" : "환율 " + fmt(fxRate(), 0) + "원 기준, "}손절 시 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원의 ${s.riskPct}%만 잃는 수량${capped ? " · 손절폭이 좁아 계좌의 25%로 줄였어요" : ""}</p>
     ${viol.length ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}</div>` : `<div class="ok">와인스테인 기본 조건 통과</div>`}
     <div class="btns">${held ? `<a class="btn" href="#hold">보유 중 · 손절 관리 보기</a>` : `<button class="btn primary" id="buyBtn">매수 기록</button>`}</div>
@@ -324,7 +329,7 @@ function openSheet(html, bind) {
 }
 function closeSheet() { const sh = $("#sheet"); sh.hidden = true; sh.innerHTML = ""; }
 function buySheet(td, qty, viol, edit) {
-  const defStop = td.signal === "돌파" ? td.close * 0.95 : td.signal === "풀백" && td.pbStop ? td.pbStop : td.stop;
+  const defStop = td.signal === "돌파" ? (td.small && td.bkStop ? Math.min(td.bkStop, td.close - 2 * td.atr) : td.close * 0.95) : td.signal === "풀백" && td.pbStop ? td.pbStop : td.stop;
   const h = edit || { buyDate: today(), buyPrice: td.close, initStop: +(+defStop).toFixed(2), shares: qty || "" };
   openSheet(`<h2>${edit ? "보유 수정" : "매수 기록"} · <span class="mono">${esc(td.t)}</span></h2>
     ${viol?.length && !edit ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}<br>그래도 기록하면 일지에 '규칙 위반'으로 표시돼요.</div>` : ""}
@@ -427,7 +432,7 @@ function bindQuickAdd(v) {
     if (!t || !(price > 0) || !(n > 0)) { err.textContent = "티커, 매수가, 수량을 확인하세요."; return; }
     let td = null; try { td = await loadT(t); } catch (_) { }
     if (!td) { err.textContent = `${t} 데이터가 없어요. S&P500·나스닥100·S&P400·러셀2000에 없는 종목은 저장소의 my_tickers.txt에 추가하면 다음 갱신부터 돼요.`; return; }
-    const stop = td.signal === "풀백" && td.pbStop && td.pbStop < price ? td.pbStop : price * 0.95;
+    const stop = td.signal === "풀백" && td.pbStop && td.pbStop < price ? td.pbStop : td.small && td.atr ? Math.min(price * 0.95, price - 2 * td.atr) : price * 0.95;
     const d = store.get();
     d.holdings.push({ id: uid(), t: td.t, buyDate: date, buyPrice: price, initStop: +stop.toFixed(2), shares: n, note: "", violations: ruleCheck(td), scoreAtBuy: td.score });
     store.save(); toast(`${td.t} 추가했어요`); route();

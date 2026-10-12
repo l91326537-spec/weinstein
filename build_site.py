@@ -66,12 +66,21 @@ def buy_plan(r):
         ok = c <= bl * (1 + chase / 100)
         plan.update(bkStatus="돌파함 · 매수 가능" if ok else "추격 한도 넘음", bkBuy=r2(b), bkMax=r2(bl * (1 + chase / 100)),
                     bkStop=r2((c if ok else b) * (1 - bs / 100)))
+    small = r.get("cap") == "소형" and r.get("atr10")
+    if small:      # 소형주: 손절을 'ATR×2'까지 넓힘 (백테스트상 -5%는 흔들림에 자주 털림). 수량은 앱이 손절폭에 맞춰 줄임
+        a2 = 2 * r["atr10"]
+        if plan.get("bkBuy"):
+            base = plan["bkStop"] / (1 - bs / 100)
+            plan["bkStop"] = r2(min(plan["bkStop"], base - a2))
+        plan.update(small=True, atr=r2(r["atr10"]))
     if r["stage"] in (1, 2) and ma:
         lo, hi = ma, ma * 1.05
         if bl and ma * 1.05 < bl * 0.97 < ma * 1.25:
             plan["rtZone"] = [r2(bl * 0.97), r2(bl * 1.03)]          # 돌파 지점 되돌림 구간
         in_pb = r.get("signal") == "풀백"
         pstop = S.entry_stop(r, "풀백") if in_pb else ma * 0.97
+        if small:
+            pstop = min(pstop, (c if in_pb else hi) - 2 * r["atr10"])
         plan.update(pbZone=[r2(lo), r2(hi)], pbStop=r2(pstop), pbNow=in_pb)
     return plan
 
