@@ -36,8 +36,8 @@ CFG = {
     "late_pts": 8,           # 2단계 후반 감점
     "base_bonus": 4,         # 기저 26주 이상 돌파 가점
     "base_short": 8,         # 기저 26주 미만 돌파 감점
-    "use_late": False,       # 2단계 후반 감점 (백테스트 결과로 결정)
-    "use_base": False,       # 기저 길이 가감점 (백테스트 결과로 결정)
+    "use_late": True,        # 2단계 후반 감점 (백테스트 결과로 결정)
+    "use_base": True,        # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
     "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
     "breakout_chase_pct": 7.0, # 돌파 지점보다 이 % 넘게 올라가 있으면 '돌파 매수'로 보지 않음 (추격 금지)

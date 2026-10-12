@@ -308,7 +308,7 @@ async function viewStock(v, t) {
   <section class="card"><h3>점수 구성</h3>
     <div class="bars">${parts.map(([k, l, m]) => { const val = bd?.[k], wd = val == null ? 0 : Math.min(1, val / m) * 100, c = wd >= 75 ? "var(--s2)" : wd >= 50 ? "#5f8a2c" : wd >= 25 ? "var(--s3)" : "var(--s4)"; return `<div class="brow"><span>${l}</span><div class="track"><div class="fill" style="width:${wd}%;background:${c}"></div></div><span class="v"><b>${val ?? "–"}</b>/${m}</span></div>`; }).join("")}
     ${grade9("거래량", td.volGrade)}${grade9("RS", td.rsGrade)}</div>
-    ${td.caps?.length ? `<p class="note">상한·감점: ${td.caps.map(esc).join(", ")}</p>` : ""}
+    ${td.caps?.length ? `<p class="note">가감점·상한: ${td.caps.map(esc).join(", ")}</p>` : ""}
     <p class="note">자동 계산 점수입니다. 사기 전에 프로젝트에 차트를 보내 최종 확인하세요.</p>
   </section>` : `<section class="card"><p class="note">업종 ETF·지수는 단계만 표시합니다. 30주선 이격 ${pct(td.ext)}</p></section>`}`;
   bindSearch(v);
