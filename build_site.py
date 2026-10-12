@@ -83,7 +83,7 @@ def buy_plan(r):
         if bl and ma * 1.05 < bl * 0.97 < ma * 1.25:
             plan["rtZone"] = [r2(bl * 0.97), r2(bl * 1.03)]          # 돌파 지점 되돌림 구간
         in_pb = r.get("signal") == "풀백"
-        pstop = S.entry_stop(r, "풀백") if in_pb else ma * 0.97
+        pstop = S.entry_stop(r, "풀백") if in_pb else min(ma * 0.98, ma * 1.05 * (1 - S.CFG["min_stop_pct"] / 100))
         if small:
             pstop = min(pstop, (c if in_pb else hi) - 2 * r["atr10"])
         plan.update(pbZone=[r2(lo), r2(hi)], pbStop=r2(pstop), pbNow=in_pb)
