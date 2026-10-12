@@ -92,6 +92,21 @@ function holdStatus(td, h) {
 }
 
 /* ---------- 규칙 점검 (매수 기록 시) ---------- */
+/* 업종 ETF 화면: 그 업종에 속한 종목 (점수 순) */
+let secCapAll = false;
+function secMembers(t) {
+  const sec = (SUM.sectors || []).find(x => x.etf === t);
+  if (!sec || !sec.mem || !sec.mem.length) return "";
+  const rows = sec.mem.filter(m => secCapAll || m[4] !== "소형");
+  const nSmall = sec.mem.filter(m => m[4] === "소형").length;
+  return `<section class="card" id="secmem"><div class="row between"><h2>${esc(sec.name)} 종목 ${rows.length}</h2>
+    ${nSmall ? `<button class="btn sm" id="secsmall">${secCapAll ? "소형주 숨기기" : `소형주 ${nSmall}개 보기`}</button>` : ""}</div>
+    <p class="note">점수 순 · 업종 ${sec.stage}단계${sec.stage === 2 ? " (좋음)" : sec.stage >= 3 ? " (조심)" : ""}</p>
+    <div class="list">${rows.map(([tk, sc, st, sg, cap, ext, nm]) => `<a class="item" href="#stock/${encodeURIComponent(tk)}">${pill(st)}
+      <span style="min-width:0"><span class="t">${esc(tk)}</span> ${sg ? `<span class="pill st2">${esc(sg)}</span>` : ""}
+      <div class="n">${cap && cap !== "기타" ? `<b class="capt">${esc(cap)}</b> ` : ""}${esc(nm)} · 이격 ${ext ?? "–"}%</div></span>
+      <span class="r"><b>${sc}</b><span class="muted" style="font-size:11px">점</span></span></a>`).join("")}</div></section>`;
+}
 /* 점수가 낮은 항목의 이유 (점수 구성 아래 한 줄) */
 function lowWhy(td) {
   const bd = td.breakdown || {}, out = [], ext = td.ext;
@@ -300,6 +315,7 @@ async function viewStock(v, t) {
     <div><div class="chartinfo"></div><div class="chartbox" id="chart"></div></div>
     <p class="note"><span style="color:var(--ma)">━</span> 30주선 · 회색 막대 거래량 · 차트를 누르거나 끌면 그 주 값이 위에 나와요</p>
   </section>
+  ${secMembers(t)}
   ${td.score != null ? `<section class="card"><h3>매수 계획</h3>
     <div class="kv">
       <div><span>돌파 매수가</span><b style="color:var(--s2)">${td.bkBuy ? fmt(td.bkBuy) : "–"}</b><small>${td.bkStatus ? esc(td.bkStatus) : ""}</small></div>
@@ -328,6 +344,7 @@ async function viewStock(v, t) {
   const box = $("#chart", v);
   const draw = () => drawChart(box, td, chartWeeks);
   draw();
+  const ssb = $("#secsmall", v); if (ssb) ssb.onclick = () => { secCapAll = !secCapAll; route(); };
   v.querySelectorAll("[data-wk]").forEach(b => b.onclick = () => { chartWeeks = +b.dataset.wk; v.querySelectorAll("[data-wk]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
   window.onresize = () => { if (document.body.contains(box)) draw(); };
   const bb = $("#buyBtn", v); if (bb) bb.onclick = () => buySheet(td, qty, viol);

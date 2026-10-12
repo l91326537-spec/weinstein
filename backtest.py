@@ -200,7 +200,7 @@ def collect_signals(frames, start, min_score_floor=50, ver=1):
 
 
 # ---------------- 거래량·매수 시점 비교용 ----------------
-def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False):
+def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False, emerg=None):
     """mode: 'intra'=장중 손절가 닿으면 매도(자동 매도) | 'close'=금요일 종가가 손절가 아래면 그 종가에 매도
        dyn_ma: 손절가 대신 '금요일 종가가 30주선 아래면 매도' (s0는 수량 계산용 명목 손절)"""
     ma_v = f["ma30"].values
@@ -226,6 +226,9 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
                 px = c[j]
                 return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "30주선 아래 마감", s_orig)
         elif mode == "close":
+            if emerg and lo[j] <= s0 * (1 - emerg / 100):        # 비상 손절: 손절가보다 emerg% 아래는 장중 자동 매도
+                px = min(o[j], s0 * (1 - emerg / 100))
+                return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "비상 손절", s_orig)
             if c[j] < s0:
                 px = c[j]
                 return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절(종가)", s_orig)
@@ -336,12 +339,38 @@ def entry_study(frames, bsig):
     return out
 
 
+def fetch_earnings(tickers):
+    """야후에서 과거 실적 발표 날짜 (종목당 최대 60개 ≈ 15년). 실패한 종목은 빠짐"""
+    import concurrent.futures as cf
+    try:
+        import yfinance as yf
+    except Exception:
+        return {}
+    def one(t):
+        try:
+            d = yf.Ticker(t).get_earnings_dates(limit=60)
+            if d is None or len(d) == 0:
+                return t, None
+            idx = pd.DatetimeIndex(d.index).tz_localize(None).normalize().sort_values()
+            return t, idx
+        except Exception:
+            return t, None
+    out = {}
+    print(f"실적 발표 날짜 받는 중 ({len(tickers)}종목)...")
+    with cf.ThreadPoolExecutor(8) as ex:
+        for t, idx in ex.map(one, tickers):
+            if idx is not None:
+                out[t] = idx
+    print(f"  {len(out)}종목 받음")
+    return out
+
+
 def e_pos(r):
     return r["entry"]
 
 
 def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2",
-                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra"):
+                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None):
     """mh: 잔고점 돌파 dict(stop='pct'|'low3', bonus=점수 가점, k=최근 몇 주 고점)
        block_rebreak: 돌파 매수가 손절로 끝난 뒤 이 주 수 동안 같은 종목 돌파 재매수 안 함"""
     """rt_stop: 돌파선 되돌림 풀백의 손절을 '돌파선 -3%·3주 저점 -1% 중 낮은 쪽'으로
@@ -430,7 +459,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(s0, e, i)
                 if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose")
+                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose", emerg)
             elif g == "돌파" and entry_rule == "monday":
                 if vol_rule == "strict" and not (bvr[i] >= 2.0):
                     continue
@@ -489,13 +518,15 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(e * (1 - pct / 100), e, i)
                 if (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be, stop_mode)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be, stop_mode, False, emerg)
+                gapk = "up" if o[j] >= trig else ("down" if o[j] <= c[i] * 0.98 else "normal")
                 last_entry = j
                 ent, ex, e, px, R, wk, why, s0 = tr
                 rows.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0,
                                  R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why,
                                  score=min(100.0, float(sc[i]) + (b12 if is12 else 0)),
-                                 signal="돌파", stage_label=f["stage_label"].iloc[i], dup=False, kind="B12" if is12 else "B2", rebreak=rebreak))
+                                 signal="돌파", stage_label=f["stage_label"].iloc[i], dup=False, kind="B12" if is12 else "B2", rebreak=rebreak,
+                                 gap=gapk, gap_pct=(o[j] / trig - 1) * 100))
                 if why == "손절" and ex is not None:
                     last_bk_stop = f.index.get_loc(ex)
     return pd.DataFrame(rows)
@@ -703,7 +734,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>풀백 손절 위치 · 장중 자동 매도 vs 금요일 종가 판단</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
+        P.append("<h2>장중 자동 매도 vs 금요일 종가 + 비상 손절 (+ 아래 신호 표에 실적 발표·갭 결과)</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -802,7 +833,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("손절 위치·방식별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("손절 방식별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -822,23 +853,28 @@ def main(argv=None, fetch=None, universe=None):
     small_t = [t for t in frames if capmap.get(t) == "소형"]
     rk_small = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
     base_kw = dict(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13)
-    sigs = {k: CV(pb_stop=k, **base_kw) for k in ("ma2", "ma3", "ma5", "maclose")}
-    sigs["cur"] = CV(**base_kw)
-    sigs["close"] = CV(stop_mode="close", **base_kw)
-    sigs["close_ma3"] = CV(stop_mode="close", pb_stop="ma3", **base_kw)
+    sigs = {"cur": CV(**base_kw), "close": CV(stop_mode="close", **base_kw)}
+    for x in (3, 5, 8):
+        sigs[f"e{x}"] = CV(stop_mode="close", emerg=x, **base_kw)
     sigs[""] = sigs["cur"]
     sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (신호 분석용)
     bk = sigs["cur"]
     bk = bk[bk["kind"].isin(["B12", "B2"]) & (bk["score"] >= args.min_score)]
     es = entry_study(frames, bk)
+    # 실적 발표 날짜 (야후). 매수 후 2주 안에 실적 발표가 있었는지
+    earn = fetch_earnings(sorted(set(sigs["cur"]["ticker"])))
+    def near_earn(t, d, days=14):
+        ds = earn.get(t)
+        if ds is None or len(ds) == 0:
+            return np.nan
+        k = ds.searchsorted(d)
+        return float(k < len(ds) and (ds[k] - d).days <= days)
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("지금 (풀백: 3주 저점·30주선 -2%, 장중 자동 매도)", 6, q, "풀백 손절 = 3주 저점 -1%와 30주선 -2% 중 낮은 쪽 · 손절가 닿으면 장중 자동 매도", "cur", None),
-        ("풀백 손절 30주선 -2%", 6, q, "풀백 손절을 30주선 -2%로만", "ma2", None),
-        ("풀백 손절 30주선 -3%", 6, q, "30주선 -3%", "ma3", None),
-        ("풀백 손절 30주선 -5%", 6, q, "30주선 -5%", "ma5", None),
-        ("풀백: 금요일 종가가 30주선 아래면 매도", 6, q, "고정 손절 없이, 주봉 종가가 그 주 30주선 아래로 마감하면 그 종가에 매도", "maclose", None),
-        ("모든 손절을 금요일 종가로 판단", 6, q, "돌파·풀백 모두: 장중에 손절가를 깨도 금요일 종가가 손절가 위면 보유, 아래면 종가에 매도", "close", None),
-        ("금요일 종가 판단 + 풀백 30주선 -3%", 6, q, "위 + 풀백 손절 30주선 -3%", "close_ma3", None),
+        ("장중 자동 매도 (지금)", 6, q, "손절가 닿으면 장중 자동 매도", "cur", None),
+        ("금요일 종가 판단만", 6, q, "금요일 종가가 손절가 아래면 그 종가에 매도", "close", None),
+        ("금요일 종가 + 비상 손절 -3%", 6, q, "금요일 종가 판단 + 손절가보다 3% 아래는 장중 자동 매도", "e3", None),
+        ("금요일 종가 + 비상 손절 -5%", 6, q, "비상 손절 손절가 -5%", "e5", None),
+        ("금요일 종가 + 비상 손절 -8%", 6, q, "비상 손절 손절가 -8%", "e8", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:
@@ -906,6 +942,18 @@ def main(argv=None, fetch=None, universe=None):
     allsig["dd"] = at("dd52")
     allsig["x52"], allsig["dump"] = at("crosses52"), at("dump13")
     allsig["evr"] = [frames[t]["vr"].asof(d) for t, d in zip(allsig["ticker"], allsig["entry_date"])]   # 매수한 주 거래량 배수
+    cs_ = sigs["cur"].copy()
+    cs_["earn"] = [near_earn(t, d) for t, d in zip(cs_["ticker"], cs_["entry_date"])]
+    have = cs_["earn"].notna()
+    print(f"  실적 날짜 확인된 거래 {int(have.sum())}/{len(cs_)}")
+    for lab, m in [(f"[실적] 매수 후 2주 안 실적 발표 있음 (날짜 확인 {int(have.sum())}건 중)", cs_["earn"] == 1), ("[실적] 2주 안 실적 발표 없음", cs_["earn"] == 0),
+                   ("[실적] 돌파 · 실적 앞둠", (cs_["earn"] == 1) & (cs_["signal"] == "돌파")), ("[실적] 돌파 · 실적 없음", (cs_["earn"] == 0) & (cs_["signal"] == "돌파")),
+                   ("[실적] 풀백 · 실적 앞둠", (cs_["earn"] == 1) & (cs_["signal"] == "풀백")), ("[실적] 풀백 · 실적 없음", (cs_["earn"] == 0) & (cs_["signal"] == "풀백"))]:
+        buckets.append((lab, stats_trades(cs_[m])))
+    bk2 = cs_[cs_["kind"].isin(["B12", "B2"])]
+    for lab, m in [("[갭] 월요일 시가가 매수가 위로 갭 (시가 매수)", bk2["gap"] == "up"), ("[갭] · 그중 매수가보다 3%+ 위 갭", (bk2["gap"] == "up") & (bk2["gap_pct"] >= 3)),
+                   ("[갭] 월요일 시가가 지난주 종가보다 2%+ 갭하락 뒤 돌파", bk2["gap"] == "down"), ("[갭] 갭 없이 주중 돌파", bk2["gap"] == "normal")]:
+        buckets.append((lab, stats_trades(bk2[m])))
     allsig["sm"] = allsig["ticker"].map(capmap) == "소형"
     pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])

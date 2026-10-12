@@ -155,7 +155,9 @@ def main(fetch=None, universe=None):
         secs.append(dict(etf=t, f=safe(t), name=v["name"], stage=v["stage"], label=v["stage_label"],
                          ext=r2(v["ext"], 1), slope=r2(v["slope"], 1), rs=r2(v["rs"], 1),
                          kind="sector" if t in S.SECTOR_ETF.values() else "industry",
-                         top=[dict(t=m["ticker"], sc=m["score"]) for m in members[:3]]))
+                         top=[dict(t=m["ticker"], sc=m["score"]) for m in members[:3]],
+                         mem=[[m["ticker"], m["score"], m["stage"], m.get("kind") or m.get("signal") or "", m.get("cap") or "",
+                               r2(m.get("ext"), 0), str(m.get("name") or "")[:28]] for m in members[:150]]))
     order = {2: 0, 1: 1, 3: 2, 4: 3}
     secs.sort(key=lambda s: (order.get(s["stage"], 4), -(s["rs"] if s["rs"] is not None else -99)))
     cands = []
