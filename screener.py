@@ -84,6 +84,9 @@ def _read_html(url):
 def _wiki_index(url, min_rows):
     """위키피디아 지수 구성 종목 표 → [(ticker, name, gics_sector)]"""
     for t in _read_html(url):
+        if isinstance(t.columns, pd.MultiIndex):
+            t.columns = [str(c[-1]) for c in t.columns]
+        t.columns = [str(c).split("[")[0].strip() for c in t.columns]
         tcol = next((c for c in t.columns if str(c) in ("Symbol", "Ticker", "Ticker symbol")), None)
         scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None) \
             or next((c for c in t.columns if "Industry" in str(c) and "Sub" not in str(c)), None)
