@@ -66,6 +66,11 @@ def buy_plan(r):
         ok = c <= bl * (1 + chase / 100)
         plan.update(bkStatus="돌파함 · 매수 가능" if ok else "추격 한도 넘음", bkBuy=r2(b), bkMax=r2(bl * (1 + chase / 100)),
                     bkStop=r2((c if ok else b) * (1 - bs / 100)))
+    # 잔고점 돌파: 30주선 우상향·30주선 위, 전고점(26주 고점)보다 5%+ 낮은 최근 8주 고점 바로 아래
+    h8 = r.get("hi8")
+    if h8 and res and ma and r["stage"] == 2 and (r.get("slope") or 0) > S.CFG["flat_pct"] and c > ma and h8 < res * 0.95 and h8 * 0.93 <= c < h8:
+        mb = h8 * 1.005
+        plan.update(mhBuy=r2(mb), mhStop=r2(min(r.get("low3") * 0.99, mb * 0.97)) if r.get("low3") else r2(mb * 0.95), mhMajor=r2(res))
     small = r.get("cap") == "소형" and r.get("atr10")
     if small:      # 소형주: 손절을 'ATR×2'까지 넓힘 (백테스트상 -5%는 흔들림에 자주 털림). 수량은 앱이 손절폭에 맞춰 줄임
         a2 = 2 * r["atr10"]

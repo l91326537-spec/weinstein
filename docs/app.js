@@ -297,6 +297,7 @@ async function viewStock(v, t) {
       <div><span>돌파 손절 (${td.small ? "ATR×2" : "-5%"})</span><b style="color:var(--s4)">${td.bkStop ? fmt(td.bkStop) : "–"}</b></div>
       <div><span>풀백 매수 구간</span><b style="color:var(--s2)">${td.pbZone ? fmt(td.pbZone[0]) + "~<wbr>" + fmt(td.pbZone[1]) : "–"}</b><small>${td.pbNow ? "지금 구간 안" : "30주선~+5%"}</small></div>
       <div><span>풀백 손절</span><b style="color:var(--s4)">${td.pbStop ? fmt(td.pbStop) : "–"}</b><small>${td.small ? "ATR×2까지 넓힘" : td.pbNow ? "3주 저점·30주선 아래" : "30주선 -3%"}</small></div>
+      ${td.mhBuy ? `<div><span>잔고점 돌파가</span><b style="color:var(--s2)">${fmt(td.mhBuy)}</b><small>손절 ${fmt(td.mhStop)} · 전고점 ${fmt(td.mhMajor)} 앞에서 꺾이면 매도</small></div>` : ""}
       ${td.rtZone ? `<div><span>돌파 지점 되돌림</span><b style="color:var(--s2)">${fmt(td.rtZone[0])}~<wbr>${fmt(td.rtZone[1])}</b></div>` : ""}
       <div><span>30주선 이격</span><b style="${td.ext >= 20 ? "color:var(--s4)" : ""}">${pct(td.ext)}</b></div>
       <div><span>추천 수량 (${s.riskPct}% 위험)</span><b>${qty ? qty.toLocaleString() + "주" : "–"}</b><small>${qtyAmt ? "약 " + (qtyAmt / 10000).toFixed(0) + "만원" : ""}</small></div>

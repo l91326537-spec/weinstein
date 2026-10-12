@@ -345,6 +345,23 @@ def indicators(df):
     # 추세 품질: 30주선 13주 상승률, 최근 13주 동안 종가가 30주선 아래로 가장 많이 내려간 정도
     f["ma_up13"] = (ma / ma.shift(13) - 1) * 100
     f["dd52"] = (c / h.rolling(52, min_periods=20).max() - 1) * 100          # 52주 고점 대비 (위쪽 매물)
+    f["hi8"] = h.rolling(8).max()                                             # 잔고점 (최근 8주 고점)
+    # 최근 13주 안에 돌파했다가 돌파선 -5%까지 밀린 적(=돌파 매수였다면 손절)이 있으면 '돌파 실패'
+    fb = np.zeros(len(f))
+    brk_w = np.nonzero(brk.values)[0]
+    resv, lv = res.values, l.values
+    for b in brk_w:
+        lvl = resv[b]
+        if np.isnan(lvl):
+            continue
+        hit = None
+        for j in range(b + 1, min(b + 14, len(f))):
+            if lv[j] <= lvl * 0.95:
+                hit = j
+                break
+        if hit is not None:
+            fb[hit:min(b + 14 + 13, len(f))] = 1
+    f["failed_brk"] = fb
     f["min_rel13"] = (c / ma).rolling(13).min()
     f["ihs"], f["hs_top"] = patterns(h, l, c)
     f["pinned"] = ((h.rolling(8).max() / l.rolling(8).min() - 1 <= 0.07) & (atrp <= 0.03) & (atrp <= prev * 0.45) & jump).astype(float)
@@ -407,7 +424,7 @@ def quality_adj(s, signal=None):
     백테스트(2006~, 신호 약 5만 개): 최근 30주선 이탈 뒤 풀백 1.33R vs 1.72R, 헤드앤숄더 천장 뒤 신호 0.78R vs 1.55R,
     역헤드앤숄더 돌파 1.39R vs 그 외 1.40R(차이 없음), 30주선 기울기 약한 풀백 1.60R vs 1.61R(차이 없음)
     백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
-    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, pinned=bool(s.get("pinned")), notes=[])
+    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, rebrk=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
@@ -422,6 +439,9 @@ def quality_adj(s, signal=None):
             out["trend"] = out.get("trend", 0) - 8; out["notes"].append(f"30주선 기울기 약함 (13주 {up13:+.1f}%) -8")
         if mr is not None and not pd.isna(mr) and mr < 0.97:
             out["trend"] = out.get("trend", 0) - 10; out["notes"].append(f"최근 13주 안에 30주선 이탈 ({(mr - 1) * 100:.0f}%) -10")
+    if signal == "돌파" and s.get("failed_brk"):
+        out["rebrk"] = -20
+        out["notes"].append("최근 13주 안 돌파 실패 뒤 재돌파 -20 (백테스트 0.19R, 승률 11%)")
     dd = s.get("dd52")
     if CFG["use_overhead"] and dd is not None and not pd.isna(dd) and (signal == "풀백" or CFG["overhead_all"]):
         if dd <= -25:
@@ -456,7 +476,7 @@ def signal_kind(s, signal):
 def apply_quality(score, q, use_late=True, use_base=True):
     if q["pinned"]:
         return min(score, 20)
-    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0))))
+    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0))))
 
 
 def classify(r):
@@ -868,7 +888,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
         caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)
-                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n]
+                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n]
         if q["pinned"]:
             sig2 = ""
         kind = signal_kind(s, sig2)
