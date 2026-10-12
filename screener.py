@@ -32,6 +32,9 @@ CFG = {
     "stop_lookback": 10,     # 손절 기준 저점을 찾을 기간(주)
     "min_price": 5.0,        # 이 가격 미만 종목 제외
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
+    "breakout_stop_pct": 3.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
+    "breakout_chase_pct": 7.0, # 돌파 지점보다 이 % 넘게 올라가 있으면 '돌파 매수'로 보지 않음 (추격 금지)
+    "min_stop_pct": 3.0,       # 손절은 매수가보다 최소 이만큼 아래
 }
 
 SECTOR_ETF = {  # GICS 섹터 → SPDR 섹터 ETF
@@ -307,6 +310,7 @@ def indicators(df):
     f["stop"] = l.rolling(CFG["stop_lookback"]).min() * 0.99
     f["stop_pct"] = (f["stop"] / c - 1) * 100
     f["low8"] = l.rolling(8).min()
+    f["low3"] = l.rolling(3).min()
     run = above.astype(int).groupby((~above).cumsum()).cumsum()
     f["weeks_above"] = run.clip(upper=30)
     f["dollar_vol"] = (c * v).rolling(10).mean()
@@ -458,6 +462,106 @@ def score_stock(s, mkt_stage, sec_stage, sec_rs):
         total -= 10; caps.append("시장 3단계 -10")
     bd = dict(market=p_mkt, sector=p_sec, stock=p_st, volume=p_v, rs=p_rs, risk=p_risk)
     return int(max(0, total)), bd, caps
+
+
+# ---------------- 점수표 v2: 손절폭이 작은 자리(돌파 직후·30주선 근처)에 높은 점수 ----------------
+def signal_v2(s):
+    st, c, ext = s["stage"], s["close"], s["ext"]
+    bl = s.get("brk_level")
+    if st == 2 and s["brk_week"] and (s["brk_vr"] or 0) >= 1.5 and bl and c <= bl * (1 + CFG["breakout_chase_pct"] / 100) and ext <= 15:
+        return "돌파"
+    if st == 2 and s["slope"] > 0 and (-3 <= ext <= 5 or (bl and abs(c / bl - 1) <= 0.03)):
+        return "풀백"
+    if st == 1 and c >= s["res"] * 0.95 and s["rs"] is not None and s["rs4"] is not None and s["rs"] > s["rs4"]:
+        return "베이스 대기"
+    return ""
+
+
+def entry_stop(s, signal, entry=None):
+    """매수 방식별 초기 손절가. 돌파=매수가 -3%, 풀백=최근 3주 저점·30주선 아래, 그 외=최근 10주 저점 아래"""
+    e = entry if entry is not None else s["close"]
+    if signal == "돌파":
+        stop = e * (1 - CFG["breakout_stop_pct"] / 100)
+    elif signal == "풀백":
+        cands = [x for x in (s.get("low3"), s.get("ma30")) if x]
+        stop = min(cands[0] * 0.99, cands[1] * 0.98) if len(cands) == 2 else (cands[0] * 0.99 if cands else s["stop"])
+    else:
+        stop = s["stop"]
+    return min(stop, e * (1 - CFG["min_stop_pct"] / 100)) if stop else stop
+
+
+def score_v2(s, mkt_stage, sec_stage, sec_rs, signal=None):
+    """시장 10 · 업종 20 · 진입 위치 25 · 거래량 25 · RS 10 · 손절폭 10, 이격 과열은 추가 감점"""
+    signal = signal_v2(s) if signal is None else signal
+    st, ext, c = s["stage"], s["ext"], s["close"]
+    p_mkt = {2: 10, 1: 6, 3: 3, 4: 0}.get(mkt_stage, 5)
+    if sec_stage is None:
+        p_sec = 0
+    else:
+        p_sec = {2: 12, 1: 8, 3: 3, 4: 0}[sec_stage]
+        if sec_rs is not None and sec_stage in (1, 2):
+            p_sec += 8 if sec_rs > 5 else 6 if sec_rs > 0 else 2 if sec_rs > -5 else 0
+    # 진입 위치 25: 1→2단계 돌파 직후, 30주선·돌파 지점 근처가 최고점
+    if signal == "돌파":
+        p_pos = 25 if s["stage_label"].startswith("1단계→2단계") else 22
+    elif signal == "풀백":
+        p_pos = 23 if -3 <= ext <= 5 else 21
+    elif st == 1 and c >= s["res"] * 0.95:
+        p_pos = 18                                   # 돌파 직전 베이스
+    elif st == 2:
+        p_pos = 14 if ext <= 10 else 8 if ext <= 15 else 3 if ext <= 20 else 0
+    elif st == 1:
+        p_pos = 6
+    else:
+        p_pos = 0
+    if c >= s["hi_all"] * 0.98:
+        p_pos = min(25, p_pos + 2)                   # 신고가권: 위쪽 매물 없음
+    # 거래량 25: 돌파 주 거래량 + 상승 주/하락 주 거래량 비
+    vr = s["brk_vr"] if s["brk_week"] else s["vr"]
+    p_v = 15 if vr >= 3 else 12 if vr >= 2 else 8 if vr >= 1.5 else 4 if vr >= 1 else 1
+    if signal == "풀백" and (s["vr"] or 9) < 0.8:
+        p_v = max(p_v, 8)                            # 거래량이 마르며 되돌리면 건전
+    u = s["updn"]
+    p_v += 10 if u >= 1.5 else 7 if u >= 1.2 else 4 if u >= 1.0 else 0
+    p_v = min(25, p_v)
+    # RS 10
+    rs, rs4 = s["rs"], s["rs4"]
+    if rs is not None and rs4 is None:
+        rs4 = rs
+    if rs is None:
+        p_rs = 3
+    elif rs > 0 and rs4 <= 0:
+        p_rs = 9
+    elif rs > 10 and rs >= rs4:
+        p_rs = 10
+    elif rs > 0 and rs >= rs4:
+        p_rs = 8
+    elif rs > 0:
+        p_rs = 5
+    elif rs > rs4:
+        p_rs = 4
+    else:
+        p_rs = 1
+    # 손절폭 10 (이 자리에서 사면 손절까지 몇 %인가)
+    stop = entry_stop(s, signal)
+    sp = abs(stop / c - 1) * 100 if stop else 99
+    p_risk = 10 if sp <= 5 else 8 if sp <= 8 else 5 if sp <= 12 else 2 if sp <= 15 else 0
+    raw = p_mkt + p_sec + p_pos + p_v + p_rs + p_risk
+    total, caps = raw, []
+    if ext > 30:
+        total -= 15; caps.append("이격 30%+ -15")
+    elif ext > 20:
+        total -= 10; caps.append("이격 20%+ -10")
+    if st in (3, 4):
+        total = min(total, 30); caps.append(f"종목 {st}단계 상한 30")
+    if sec_stage == 4:
+        total = min(total, 40); caps.append("업종 4단계 상한 40")
+    if mkt_stage == 4:
+        total = min(total, 50); caps.append("시장 4단계 상한 50")
+    elif mkt_stage == 3:
+        total -= 10; caps.append("시장 3단계 -10")
+    bd = dict(market=p_mkt, sector=p_sec, stock=p_pos, volume=p_v, rs=p_rs, risk=p_risk)
+    return int(max(0, total)), bd, caps, stop
 
 
 def signal_of(s):
@@ -613,14 +717,16 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
             etf = SECTOR_ETF.get(info.get("sector") or "")
         sec = sectors.get(etf) if etf else None
         m_stage = worst if info["bench"] == "us" else None
-        score, bd, caps = score_stock(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None)
+        sig2 = signal_v2(s)
+        score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
+        s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100
         s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
                  sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),
                  sector_etf=etf, sector_stage=sec["stage"] if sec else None,
-                 volGrade=grade_from(bd["volume"], 15), rsGrade=grade_from(bd["rs"], 15),
+                 volGrade=grade_from(bd["volume"], 25), rsGrade=grade_from(bd["rs"], 10),
                  buy_stop=round(s["res"] * 1.005, 2) if s["close"] <= s["res"]
                  else round(s["brk_level"] * 1.005, 2) if s["brk_level"] else None)
-        s["signal"] = signal_of(s)
+        s["signal"] = sig2
         rows.append(s)
     rows.sort(key=lambda r: -r["score"])
     return dict(day=day, mk=mk, sectors=sectors, rows=rows, dfs=dfs, uni=uni, bench=bench, worst=worst)

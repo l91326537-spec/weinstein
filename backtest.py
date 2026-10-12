@@ -70,10 +70,10 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = s2["stage"], s2["rs"]
         else:
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
-        scores, sigs = [], []
+        scores, sigs, scores2, sigs2 = [], [], [], []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -84,7 +84,13 @@ def build_frames(dfs, uni):
             ok = (r["close"] >= S.CFG["min_price"]) and (r["dollar_vol"] >= S.CFG["min_dollar_vol"])
             scores.append(sc if ok else np.nan)
             sigs.append(S.signal_of(d) if ok else "")
-        f["score"], f["signal"] = scores, sigs
+            g2 = S.signal_v2(d)
+            sc2 = S.score_v2(d, ms, ss, None if pd.isna(r["sec_rs"]) else r["sec_rs"], g2)[0]
+            if ss is None:
+                sc2 = min(100, sc2 + round(BT["no_sector_pts"] * 0.8))
+            scores2.append(sc2 if ok else np.nan)
+            sigs2.append(g2 if ok else "")
+        f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         frames[t] = f
         if (i + 1) % 50 == 0:
             print(f"  {i + 1}/{len(uni)}")
@@ -103,7 +109,10 @@ EXIT = dict(EXITS["A 지금 규칙"])
 
 
 # ---------------- 거래 한 건 시뮬레이션 ----------------
-def simulate_trade(f, i):
+STOP = {"mode": "base"}     # base = 최근 10주 저점 아래 / entry = 매수 방식별(돌파 -N%, 풀백 = 3주 저점·30주선 아래)
+
+
+def simulate_trade(f, i, signal=""):
     """i주 신호 → i+1주 시가 매수. (진입일, 청산일, 진입가, 청산가, R배수, 보유주, 청산사유, 초기손절) 또는 None"""
     if i + 1 >= len(f):
         return None
@@ -111,6 +120,11 @@ def simulate_trade(f, i):
     ma, low8, stg = f["ma30"].values, f["low8"].values, f["stage"].values
     e = o[i + 1]
     s = f["stop"].values[i]
+    if STOP["mode"] == "entry" and signal in ("돌파", "풀백"):
+        if signal == "돌파":
+            s = e * (1 - STOP["pct"] / 100)
+        else:
+            s = min(f["low3"].values[i] * 0.99, f["ma30"].values[i] * 0.98)
     if e > 0 and s > e * (1 - BT["min_stop_pct"] / 100):
         s = e * (1 - BT["min_stop_pct"] / 100)
     if not (e > s > 0) or (e - s) / e * 100 > BT["max_stop_pct"]:
@@ -143,15 +157,16 @@ def simulate_trade(f, i):
     return (f.index[i + 1], None, e, c[-1], (c[-1] - e) / risk, len(f) - i - 2, "보유 중", s0)
 
 
-def collect_signals(frames, start, min_score_floor=50):
+def collect_signals(frames, start, min_score_floor=50, ver=1):
     rows = []
     for t, f in frames.items():
+        f["score"], f["signal"] = f[f"score{ver}"], f[f"signal{ver}"]
         idx = np.where((f["signal"].isin(BT["signals"])) & (f["score"] >= min_score_floor) & (f.index >= start))[0]
         last = -99
         for i in idx:
             dedupe = i - last <= 4                      # 4주 안에 반복된 신호는 같은 셋업으로 보고 통계에서 제외
             last = i
-            tr = simulate_trade(f, i)
+            tr = simulate_trade(f, i, f["signal"].iloc[i])
             if tr is None:
                 continue
             ent, ex, e, px, R, wk, why, s0 = tr
@@ -292,9 +307,9 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>손절 규칙 비교</h2><div class=mut style='margin-bottom:6px'>매수 조건은 같고 파는 규칙만 다르게 해서 돌린 결과. "
+        P.append("<h2>점수표 · 손절 조합 비교</h2><div class=mut style='margin-bottom:6px'>v1 = 예전 점수표, v2 = 손절폭이 작은 자리(돌파 직후·30주선 근처)와 거래량에 높은 점수, 이격 과열 감점. "
                  f"아래 나머지 표는 연평균이 가장 높았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
-                 "<div class=tw><table><tr><th class=l>손절 규칙</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
+                 "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
             c_, t_ = r["c"], r["t"]
             P.append(f"<tr><td class=l><b>{e(r['name'])}</b>{' ★' if r['name'] == best else ''}<div class=mut style='font-size:12px;white-space:normal;min-width:220px'>{e(r['desc'])}</div></td>"
@@ -391,24 +406,39 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("손절 규칙별로 거래를 따라가는 중...")
-    comp, runs = [], {}
-    for name, X in EXITS.items():
-        EXIT.clear(); EXIT.update(X)
-        sg = collect_signals(frames, start)
+    print("점수표·손절 조합별로 거래를 따라가는 중...")
+    GRID = [  # (이름, 점수표, 초기 손절, 돌파 손절 %, 파는 규칙)
+        ("① v1 점수 · 10주 저점 손절 · 4단계까지", 1, "base", None, "E 4단계까지 보유"),
+        ("② v2 점수 · 10주 저점 손절 · 4단계까지", 2, "base", None, "E 4단계까지 보유"),
+        ("③ v2 점수 · 돌파 -3% / 풀백 저점 · 4단계까지", 2, "entry", 3.0, "E 4단계까지 보유"),
+        ("④ v2 점수 · 돌파 -5% / 풀백 저점 · 4단계까지", 2, "entry", 5.0, "E 4단계까지 보유"),
+        ("⑤ v2 점수 · 돌파 -3% / 풀백 저점 · 30주선 추적", 2, "entry", 3.0, "B 30주선 추적"),
+        ("⑥ v2 점수 · 돌파 -3% / 풀백 저점 · 2R 후 30주선", 2, "entry", 3.0, "D 2R 후 30주선"),
+    ]
+    comp, runs, combos = [], {}, {}
+    for name, ver, smode, pct, ex in GRID:
+        EXIT.clear(); EXIT.update(EXITS[ex])
+        STOP.clear(); STOP.update(mode=smode, pct=pct)
+        sg = collect_signals(frames, start, ver=ver)
         if sg.empty:
             continue
         e_, t_ = run_portfolio(sg, frames, cal, args.min_score)
         cs, ts = stats_curve(e_["equity"]), stats_trades(t_)
         cl = sg[~sg["dup"]]
         hi = stats_trades(cl[cl["score"] >= 75]); lo_ = stats_trades(cl[cl["score"] < 65])
-        comp.append(dict(name=name, desc=X["desc"], c=cs, t=ts, hiR=hi.get("avgR"), loR=lo_.get("avgR")))
+        desc = f"점수표 v{ver} · 초기 손절 {'매수 방식별 (돌파 -' + str(int(pct)) + '%, 풀백 = 3주 저점·30주선 아래)' if smode == 'entry' else '최근 10주 저점 아래'} · 파는 규칙: {EXITS[ex]['desc']}"
+        comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=hi.get("avgR"), loR=lo_.get("avgR")))
         runs[name] = (sg, e_, t_)
+        combos[name] = (ver, smode, pct, ex)
         print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 거래 {ts.get('n', 0)}")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
-    EXIT.clear(); EXIT.update(EXITS[best])
+    ver_b, smode_b, pct_b, ex_b = combos[best]
+    EXIT.clear(); EXIT.update(EXITS[ex_b])
+    STOP.clear(); STOP.update(mode=smode_b, pct=pct_b)
+    for f in frames.values():
+        f["score"], f["signal"] = f[f"score{ver_b}"], f[f"signal{ver_b}"]
     sig, eq, trades = runs[best]
     capmap = {t: v.get("cap", "기타") for t, v in uni.items()}
     sig["cap"] = sig["ticker"].map(capmap)

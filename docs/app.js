@@ -269,7 +269,7 @@ async function viewStock(v, t) {
   const qty = risk > 0 ? Math.floor(acct * s.riskPct / 100 / risk) : null;
   const qtyAmt = qty ? Math.round(toKRW(qty * entry, t)) : null;
   const viol = td.score != null ? ruleCheck(td) : [];
-  const bd = td.breakdown, parts = [["market", "시장", 10], ["sector", "업종", 25], ["stock", "종목 위치", 25], ["volume", "거래량", 15], ["rs", "RS", 15], ["risk", "손절/위험", 10]];
+  const bd = td.breakdown, parts = [["market", "시장", 10], ["sector", "업종", 20], ["stock", "진입 위치", 25], ["volume", "거래량", 25], ["rs", "RS", 10], ["risk", "손절폭", 10]];
   const held = store.get().holdings.find(h => h.t === t);
   v.innerHTML = `${searchBox()}
   <section class="card">
