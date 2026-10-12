@@ -41,6 +41,9 @@ CFG = {
     "use_pattern": True,     # 역헤드앤숄더 돌파 가점·헤드앤숄더 천장 감점 (백테스트 결과로 결정)
     "use_overhead": False,   # 52주 고점 대비 많이 빠진 종목 감점 (백테스트 결과로 결정)
     "overhead_all": False,   # True면 돌파에도 적용, False면 풀백만
+    "use_chop": False,       # 30주선을 자주 들락날락하는 종목 감점 (백테스트 결과로 결정)
+    "use_dump": False,       # 큰 거래량 동반 급락 이력 감점 (백테스트 결과로 결정)
+    "no_sector_pts": 10,     # 업종 ETF를 못 찾은 종목은 업종 점수를 중립으로
     "b12_pts": 10,           # 1→2단계 돌파 가점 (먼저 사도록)
     "use_base": True,        # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
@@ -83,6 +86,10 @@ MYSECTOR_ETF = {
     "생명과학 도구": "XLV", "헬스케어 테크": "XLV", "화장품·생활용품": "XLP", "중국": "FXI", "중국 교육": "FXI",
 }
 CAP_ORDER = {"대형": 0, "중형": 1, "소형": 2}
+SECTOR_FIX = {"ASML": "Information Technology", "MSTR": "Information Technology", "ALNY": "Health Care",
+              "MELI": "Consumer Discretionary", "SHOP": "Information Technology", "CCEP": "Consumer Staples",
+              "PDD": "Consumer Discretionary", "RKLB": "Industrials", "ARM": "Information Technology",
+              "TRI": "Industrials", "FER": "Industrials", "ALAB": "Information Technology", "CRWV": "Information Technology"}
 UNI_DIR = os.path.join(HERE, "universe")
 MARKET = {"^IXIC": "나스닥", "^GSPC": "S&P500"}
 BENCH = {"us": "^GSPC", "ks": "^KS11", "kq": "^KQ11"}
@@ -225,6 +232,9 @@ def load_universe(quick=False):
             if cur is None or CAP_ORDER[cap] < CAP_ORDER[cur["cap"]]:
                 uni[tk] = {"name": name, "sector": sec or (cur or {}).get("sector"), "bench": "us", "cap": cap}
         print(f"  {key}: {len(rows or [])}종목")
+    for tk, sec in SECTOR_FIX.items():          # 나스닥100에만 있어 업종이 비는 종목
+        if tk in uni and not uni[tk].get("sector"):
+            uni[tk]["sector"] = sec
     # 내 종목 (한 줄에: 티커 [업종명])  예) 005930.KS 반도체 / OUST 로봇·자율주행
     path = os.path.join(HERE, "my_tickers.txt")
     if os.path.exists(path):
@@ -345,7 +355,10 @@ def indicators(df):
     # 추세 품질: 30주선 13주 상승률, 최근 13주 동안 종가가 30주선 아래로 가장 많이 내려간 정도
     f["ma_up13"] = (ma / ma.shift(13) - 1) * 100
     f["dd52"] = (c / h.rolling(52, min_periods=20).max() - 1) * 100          # 52주 고점 대비 (위쪽 매물)
-    f["hi8"] = h.rolling(8).max()                                             # 잔고점 (최근 8주 고점)
+    f["hi8"] = h.rolling(8).max()
+    f["crosses52"] = (above.shift(1, fill_value=False) & ~above).astype(int).rolling(52, min_periods=20).sum()   # 30주선 아래로 내려간 횟수
+    dumpw = ((c / c.shift(1) - 1) <= -0.07) & (vr >= 2)                      # 거래량 2배+ 동반 -7% 이상 급락 주
+    f["dump13"] = dumpw.astype(int).rolling(13, min_periods=1).max()                                             # 잔고점 (최근 8주 고점)
     # 최근 13주 안에 돌파했다가 돌파선 -5%까지 밀린 적(=돌파 매수였다면 손절)이 있으면 '돌파 실패'
     fb = np.zeros(len(f))
     brk_w = np.nonzero(brk.values)[0]
@@ -424,7 +437,7 @@ def quality_adj(s, signal=None):
     백테스트(2006~, 신호 약 5만 개): 최근 30주선 이탈 뒤 풀백 1.33R vs 1.72R, 헤드앤숄더 천장 뒤 신호 0.78R vs 1.55R,
     역헤드앤숄더 돌파 1.39R vs 그 외 1.40R(차이 없음), 30주선 기울기 약한 풀백 1.60R vs 1.61R(차이 없음)
     백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
-    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, rebrk=0, pinned=bool(s.get("pinned")), notes=[])
+    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, rebrk=0, chop=0, dump=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
@@ -439,6 +452,14 @@ def quality_adj(s, signal=None):
             out["trend"] = out.get("trend", 0) - 8; out["notes"].append(f"30주선 기울기 약함 (13주 {up13:+.1f}%) -8")
         if mr is not None and not pd.isna(mr) and mr < 0.97:
             out["trend"] = out.get("trend", 0) - 10; out["notes"].append(f"최근 13주 안에 30주선 이탈 ({(mr - 1) * 100:.0f}%) -10")
+    if s.get("crosses52") is not None and not pd.isna(s.get("crosses52")) and s["crosses52"] >= 4:
+        out["chop"] = -8
+        if CFG["use_chop"]:
+            out["notes"].append(f"30주선 들락날락 (52주 {int(s['crosses52'])}번 이탈) -8")
+    if s.get("dump13"):
+        out["dump"] = -10
+        if CFG["use_dump"]:
+            out["notes"].append("최근 13주 안 큰 거래량 동반 급락 -10")
     if signal == "돌파" and s.get("failed_brk"):
         out["rebrk"] = -20
         out["notes"].append("최근 13주 안 돌파 실패 뒤 재돌파 -20 (백테스트 0.19R, 승률 11%)")
@@ -476,7 +497,8 @@ def signal_kind(s, signal):
 def apply_quality(score, q, use_late=True, use_base=True):
     if q["pinned"]:
         return min(score, 20)
-    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0))))
+    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0)
+                               + (q.get("chop", 0) if CFG["use_chop"] else 0) + (q.get("dump", 0) if CFG["use_dump"] else 0))))
 
 
 def classify(r):
@@ -885,10 +907,13 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         m_stage = worst if info["bench"] == "us" else None
         sig2 = signal_v2(s)
         score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
+        if sec is None and info["bench"] == "us":
+            score = min(100, score + CFG["no_sector_pts"])
+            caps = caps + [f"업종 정보 없음 · 중립 {CFG['no_sector_pts']}점"]
         q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
         caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)
-                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n]
+                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n or "들락날락" in n or "급락" in n]
         if q["pinned"]:
             sig2 = ""
         kind = signal_kind(s, sig2)

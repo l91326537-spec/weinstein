@@ -72,11 +72,12 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
         qL, qB, qP, qT, qPt = [], [], [], [], []
+        qC, qD = [], []
         ddv = f["dd52"].values
         isb = []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -96,6 +97,7 @@ def build_frames(dfs, uni):
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
             qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
+            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0))
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
@@ -106,7 +108,8 @@ def build_frames(dfs, uni):
         ov = np.where(dd <= -25, -10, np.where(dd <= -15, -5, 0))
         ovp = np.where(np.array(isb), 0, ov)
         cur = base + T + Pt
-        for name, a in (("TPt", cur), ("OVp", cur + ovp), ("OV", cur + ov)):
+        C, D = np.array(qC, float), np.array(qD, float)
+        for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D)):
             v = np.clip(s2 + a, 0, 100)
             f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
@@ -624,7 +627,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>재돌파 재매수 · 잔고점 돌파 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
+        P.append("<h2>30주선 들락날락 · 거래량 동반 급락 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -723,7 +726,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("재돌파·잔고점 돌파 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("들락날락·급락 규칙별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -742,19 +745,15 @@ def main(argv=None, fetch=None, universe=None):
     TP = "score2TPt"
     small_t = [t for t in frames if capmap.get(t) == "소형"]
     rk_small = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
-    sigs = {"cur": CV(small=OUT, score_col=TP, b12=10),
-            "nore": CV(small=OUT, score_col=TP, b12=10, block_rebreak=13),
-            "mh5": CV(small=OUT, score_col=TP, b12=10, mh=dict(stop="pct")),
-            "mhl": CV(small=OUT, score_col=TP, b12=10, mh=dict(stop="low3")),
-            "mh_s": CV(small=dict(top=200, rk=rk_small, atr=True, vol2=True), score_col=TP, b12=10, mh=dict(stop="low3"))}
+    sigs = {k: CV(small=OUT, score_col="score2" + k, b12=10, block_rebreak=13) for k in ("TPt", "C", "D", "CD")}
+    sigs["cur"] = sigs["TPt"]
     sigs[""] = sigs["cur"]
-    sig_inc = CV(score_col="score2TPt", mh=dict(stop="low3"))          # 소형주 포함 (신호 분석용)
+    sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (신호 분석용)
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("지금 앱 점수", 6, q, "1→2 돌파 +10 · 돌파 손절 뒤 재돌파하면 다시 삼", "cur", None),
-        ("재돌파 안 삼", 6, q, "돌파 매수가 손절로 끝나면 13주 동안 같은 종목 돌파는 안 삼", "nore", None),
-        ("+ 잔고점 돌파 (-5% 손절)", 6, q, "30주선 우상향·30주선 위에서, 전고점보다 5%+ 낮은 최근 8주 고점을 넘으면 매수 · 손절 -5% · 전고점 -3%까지 갔다 꺾이면 매도, 전고점을 넘으면 4단계까지 보유", "mh5", None),
-        ("+ 잔고점 돌파 (3주 저점 손절)", 6, q, "같은 조건, 손절은 3주 저점 -1% (최소 3%)", "mhl", None),
-        ("+ 잔고점 돌파 + 소형주 상위 200", 6, q, "위 + 소형주도 거래대금 상위 200·ATR 손절·거래량 2배 조건으로 포함", "mh_s", None),
+        ("지금 앱 점수", 6, q, "1→2 돌파 +10 · 손절 뒤 13주 재돌파 안 삼", "TPt", None),
+        ("+ 30주선 들락날락 -8", 6, q, "최근 52주 동안 종가가 30주선 아래로 4번 이상 내려간 2단계 종목 -8", "C", None),
+        ("+ 거래량 동반 급락 -10", 6, q, "최근 13주 안에 거래량 2배+ 동반 -7% 이상 급락한 주가 있으면 -10", "D", None),
+        ("+ 둘 다", 6, q, "위 두 가지", "CD", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:
@@ -820,6 +819,8 @@ def main(argv=None, fetch=None, universe=None):
     allsig["upw"], allsig["rise"], allsig["bl"] = at("ma_up_weeks"), at("ma_rise52"), at("base_len")
     allsig["up13"], allsig["mr13"], allsig["ihs"], allsig["hst"] = at("ma_up13"), at("min_rel13"), at("ihs"), at("hs_top")
     allsig["dd"] = at("dd52")
+    allsig["x52"], allsig["dump"] = at("crosses52"), at("dump13")
+    allsig["evr"] = [frames[t]["vr"].asof(d) for t, d in zip(allsig["ticker"], allsig["entry_date"])]   # 매수한 주 거래량 배수
     allsig["sm"] = allsig["ticker"].map(capmap) == "소형"
     pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
@@ -836,8 +837,13 @@ def main(argv=None, fetch=None, universe=None):
                    ("[종류] 1→2단계 돌파 (대·중형)", (allsig["kind"] == "B12") & ~allsig["sm"]), ("[종류] 2단계 중간 돌파 (대·중형)", (allsig["kind"] == "B2") & ~allsig["sm"]),
                    ("[재돌파] 첫 돌파 (대·중형)", allsig["kind"].isin(["B12", "B2"]) & ~allsig["rebreak"].fillna(False).astype(bool) & ~allsig["sm"]),
                    ("[재돌파] 손절 뒤 13주 안 재돌파 (대·중형)", allsig["kind"].isin(["B12", "B2"]) & allsig["rebreak"].fillna(False).astype(bool) & ~allsig["sm"]),
-                   ("[잔고점] 대·중형", (allsig["kind"] == "MH") & ~allsig["sm"]), ("[잔고점] 소형주", (allsig["kind"] == "MH") & allsig["sm"]),
-                   ("[잔고점] 일반 돌파 (대·중형, 비교)", allsig["kind"].isin(["B12", "B2"]) & ~allsig["sm"]),
+                   ("[들락날락] 52주 30주선 이탈 0~1번 (대·중형)", (allsig["x52"] <= 1) & ~allsig["sm"]),
+                   ("[들락날락] 2~3번", (allsig["x52"] >= 2) & (allsig["x52"] <= 3) & ~allsig["sm"]),
+                   ("[들락날락] 4번 이상", (allsig["x52"] >= 4) & ~allsig["sm"]),
+                   ("[급락] 13주 안 거래량 동반 급락 있음 (대·중형)", (allsig["dump"] > 0) & ~allsig["sm"]),
+                   ("[급락] 없음", (allsig["dump"] == 0) & ~allsig["sm"])] + [
+                   (f"[거래량] 돌파 매수 주 거래량 {lab} (대·중형)", allsig["kind"].isin(["B12", "B2"]) & ~allsig["sm"] & (allsig["evr"] >= lo) & (allsig["evr"] < hi))
+                   for lab, lo, hi in (("1배 미만", 0, 1), ("1~1.5배", 1, 1.5), ("1.5~2배", 1.5, 2), ("2~3배", 2, 3), ("3배 이상", 3, 999))] + [
                    ("[종류] 30주선 풀백 (대·중형)", (allsig["kind"] == "MA") & ~allsig["sm"]), ("[종류] 돌파선 되돌림 · 30주선 아래 손절 (대·중형)", (allsig["kind"] == "RT") & ~allsig["sm"])] + [
                    (f"[매물] {nm} · 52주 고점 대비 {lab}", sel & (allsig["dd"] > lo) & (allsig["dd"] <= hi))
                    for nm, sel in (("풀백", pb & ~allsig["sm"]), ("돌파", bk & ~allsig["sm"]), ("소형주 전체", allsig["sm"]), ("대·중형 전체", ~allsig["sm"]))
