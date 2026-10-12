@@ -83,7 +83,9 @@ def main(fetch=None, universe=None):
         b = bench.get(info.get("bench", "us")) if bench else None
         if (t.startswith("^") and t not in S.MARKET) or "=" in t:
             continue
-        payload = dict(t=t, name=str(info.get("name") or names.get(t, t)),
+        if t in uni and t not in byt and not info.get("mine"):
+            continue          # 거래대금·가격 기준에서 걸러진 종목은 앱 데이터에서 뺌
+        payload = dict(t=t, name=str(info.get("name") or names.get(t, t)), cap=info.get("cap"),
                        sector=info.get("mysector") or S.SECTOR_KO.get(info.get("sector") or "", None),
                        w=series_payload(df, b))
         if t in byt:
@@ -97,7 +99,7 @@ def main(fetch=None, universe=None):
             json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
         written.add(safe(t))
         c = df["Close"]
-        index.append(dict(t=t, f=safe(t), n=payload["name"], s=payload.get("sector"),
+        index.append(dict(t=t, f=safe(t), n=payload["name"], s=payload.get("sector"), cap=info.get("cap"),
                           sc=payload.get("score"), st=payload.get("stage"), sg=payload.get("signal") or "",
                           c=r2(c.iloc[-1]), w1=r2((c.iloc[-1] / c.iloc[-2] - 1) * 100, 1) if len(c) > 1 else None,
                           k="etf" if t in names else "stock"))
@@ -122,13 +124,14 @@ def main(fetch=None, universe=None):
         if not r["signal"] and r["score"] < 65:
             continue
         d = stock_payload(r)
-        d.update(t=r["ticker"], f=safe(r["ticker"]), n=str(r["name"]), s=r.get("sector_ko"))
+        d.update(t=r["ticker"], f=safe(r["ticker"]), n=str(r["name"]), s=r.get("sector_ko"), cap=r.get("cap"), mine=r.get("mine"))
         cands.append(d)
     fx = r2(dfs["KRW=X"]["Close"].iloc[-1], 1) if "KRW=X" in dfs else None
     summary = dict(fx=fx, updated=dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"), day=R["day"],
                    weekComplete=week_complete(), lastBar=str(dfs["^GSPC"].index[-1].date()) if "^GSPC" in dfs else None,
                    market=mk, worst=R["worst"], sectors=secs, candidates=cands,
-                   index=sorted(index, key=lambda x: x["t"]), counts=dict(total=len(rows)))
+                   index=sorted(index, key=lambda x: x["t"]),
+                   counts=dict(total=len(rows), universe=len(uni), **{c: sum(1 for r in rows if r.get("cap") == c) for c in ("대형", "중형", "소형")}))
     with open(os.path.join(DATA, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, separators=(",", ":"))
     print(f"앱 데이터 완료: 종목 파일 {len(written)}개 · 후보 {len(cands)}개")

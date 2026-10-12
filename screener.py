@@ -46,13 +46,29 @@ SECTOR_KO = {
     "Industrials": "산업재", "Consumer Staples": "필수소비재", "Energy": "에너지",
     "Utilities": "유틸리티", "Real Estate": "부동산", "Materials": "소재",
 }
-INDUSTRY_ETF = {  # 세부 업종 ETF (업종 단계 표에만 표시)
+INDUSTRY_ETF = {  # 세부 업종 ETF (업종 단계 표에 표시)
     "SMH": "반도체", "IGV": "소프트웨어", "FDN": "인터넷", "ARKF": "핀테크", "CIBR": "사이버보안",
-    "BOTZ": "로봇·AI", "XBI": "바이오", "IHI": "의료기기", "KRE": "지역은행", "IAI": "증권·거래소",
+    "BOTZ": "로봇·자율주행", "XBI": "바이오(중소형)", "IHI": "의료기기", "KRE": "지역은행", "IAI": "증권·거래소",
     "ITA": "항공우주·방산", "JETS": "항공", "XHB": "주택건설", "XRT": "소매", "TAN": "태양광",
-    "URA": "우라늄", "XME": "금속·광업", "GDX": "금광", "OIH": "석유서비스", "IYT": "운송",
-    "PAVE": "인프라", "KWEB": "중국 인터넷", "IBB": "바이오(대형)", "SKYY": "클라우드",
+    "URA": "원자력·우라늄", "XME": "금속·광업", "GDX": "금광", "OIH": "석유서비스", "IYT": "운송·물류",
+    "PAVE": "인프라", "KWEB": "중국 인터넷", "IBB": "바이오", "SKYY": "클라우드",
+    # 보드에서 쓰던 업종 ETF
+    "MOO": "농업", "KBE": "은행", "MSOS": "대마초", "FXI": "중국", "COPX": "구리·원자재", "BKCH": "크립토",
+    "IHF": "헬스케어 서비스·보험", "ITB": "주택건설(건설사)", "PEJ": "레저·여행", "PPH": "제약", "SLX": "철강",
+    "QTUM": "양자컴퓨팅", "REMX": "희토류", "EATZ": "외식", "BDRY": "해운",
 }
+# 내 업종 이름 → 그 업종을 대표하는 ETF (my_tickers.txt의 업종명으로 업종 단계를 계산)
+MYSECTOR_ETF = {
+    "반도체": "SMH", "소프트웨어": "IGV", "인터넷": "FDN", "핀테크": "ARKF", "사이버보안": "CIBR",
+    "로봇·자율주행": "BOTZ", "바이오": "IBB", "의료기기": "IHI", "클라우드": "SKYY", "농업": "MOO",
+    "구리·원자재": "COPX", "금속·광업": "XME", "금광": "GDX", "에너지": "XLE", "철강": "SLX",
+    "헬스케어 서비스·보험": "IHF", "제약": "PPH", "레저·여행": "PEJ", "외식": "EATZ", "광통신": "SMH",
+    "IT 하드웨어": "XLK", "전자부품·EMS·유통": "XLK", "산업재": "XLI", "미디어·통신": "XLC",
+    "양자컴퓨팅": "QTUM", "해운·탱커": "BDRY", "원자력·우라늄": "URA", "교육": "XLY",
+    "생명과학 도구": "XLV", "헬스케어 테크": "XLV", "화장품·생활용품": "XLP", "중국": "FXI", "중국 교육": "FXI",
+}
+CAP_ORDER = {"대형": 0, "중형": 1, "소형": 2}
+UNI_DIR = os.path.join(HERE, "universe")
 MARKET = {"^IXIC": "나스닥", "^GSPC": "S&P500"}
 BENCH = {"us": "^GSPC", "ks": "^KS11", "kq": "^KQ11"}
 
@@ -65,35 +81,85 @@ def _read_html(url):
     return pd.read_html(io.StringIO(r.text))
 
 
-def load_universe(quick=False):
-    """ticker -> {"name","sector","bench"}"""
-    uni = {}
-    print("종목 목록 받는 중 (위키피디아)...")
-    if not quick:
+def _wiki_index(url, min_rows):
+    """위키피디아 지수 구성 종목 표 → [(ticker, name, gics_sector)]"""
+    for t in _read_html(url):
+        tcol = next((c for c in t.columns if str(c) in ("Symbol", "Ticker", "Ticker symbol")), None)
+        scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None)
+        if tcol is None or scol is None or len(t) < min_rows:
+            continue
+        ncol = next((c for c in t.columns if str(c) in ("Security", "Company")), tcol)
+        return [(str(r[tcol]).replace(".", "-").strip(), str(r[ncol]), str(r[scol])) for _, r in t.iterrows()]
+    raise ValueError("표를 찾지 못함")
+
+
+def _russell2000():
+    """러셀 2000: iShares IWM 보유 종목 파일"""
+    import csv, requests
+    url = ("https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax"
+           "?fileType=csv&fileName=IWM_holdings&dataType=fund")
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=60)
+    r.raise_for_status()
+    lines = r.text.splitlines()
+    k = next(i for i, l in enumerate(lines) if l.startswith("Ticker,"))
+    fix = {"Communication": "Communication Services"}
+    out = []
+    for row in csv.DictReader(lines[k:]):
+        tk = (row.get("Ticker") or "").strip()
+        if row.get("Asset Class") != "Equity" or not tk or not all(ch.isalpha() or ch in ".-" for ch in tk):
+            continue
+        sec = (row.get("Sector") or "").strip()
+        out.append((tk.replace(".", "-"), (row.get("Name") or tk).strip().title(), fix.get(sec, sec)))
+    if len(out) < 1000:
+        raise ValueError(f"종목 수가 너무 적음 ({len(out)})")
+    return out
+
+
+SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
+    ("sp500", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 400)),
+    ("ndx", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90)),
+    ("sp400", "중형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 300)),
+    ("r2000", "소형", _russell2000),
+]
+
+
+def refresh_universe():
+    """종목 목록을 새로 받아 universe/*.csv로 저장 (GitHub에서 한 달에 한 번 실행)"""
+    os.makedirs(UNI_DIR, exist_ok=True)
+    for key, cap, fn in SOURCES:
         try:
-            t = _read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-            for _, r in t.iterrows():
-                tk = str(r["Symbol"]).replace(".", "-")
-                uni[tk] = {"name": r["Security"], "sector": r["GICS Sector"], "bench": "us"}
-            print(f"S&P500 {len(t)}종목 불러옴")
+            rows = fn()
+            pd.DataFrame(rows, columns=["ticker", "name", "sector"]).to_csv(os.path.join(UNI_DIR, key + ".csv"), index=False)
+            print(f"{key}: {len(rows)}종목 저장")
         except Exception as e:
-            print("S&P500 목록을 못 불러왔습니다:", e)
-    try:
-        for t in _read_html("https://en.wikipedia.org/wiki/Nasdaq-100"):
-            cols = [str(c) for c in t.columns]
-            tcol = next((c for c in t.columns if str(c) in ("Ticker", "Symbol")), None)
-            scol = next((c for c in t.columns if "GICS" in str(c) and "Sector" in str(c)), None)
-            if tcol is None or scol is None or len(t) < 90:
+            print(f"{key}: 받지 못함 ({e}) — 기존 목록 유지")
+
+
+def load_universe(quick=False):
+    """ticker -> {"name","sector","bench","cap","mine"}"""
+    uni = {}
+    print("종목 목록 불러오는 중...")
+    for key, cap, fn in SOURCES:
+        if quick and key != "ndx":
+            continue
+        path = os.path.join(UNI_DIR, key + ".csv")
+        rows = None
+        if os.path.exists(path):
+            rows = pd.read_csv(path).fillna("").values.tolist()
+        else:
+            try:
+                rows = fn()
+            except Exception as e:
+                print(f"{key} 목록을 못 불러왔습니다:", e)
+        for tk, name, sec in rows or []:
+            tk = str(tk).strip()
+            if not tk:
                 continue
-            ncol = next((c for c in t.columns if str(c) in ("Company", "Security")), tcol)
-            for _, r in t.iterrows():
-                tk = str(r[tcol]).replace(".", "-")
-                uni.setdefault(tk, {"name": r[ncol], "sector": r[scol], "bench": "us"})
-            print(f"나스닥100 {len(t)}종목 불러옴")
-            break
-    except Exception as e:
-        print("나스닥100 목록을 못 불러왔습니다:", e)
-    # 내 종목 (한 줄에: 티커 [업종명])  예) 005930.KS 반도체 / OUST 로봇
+            cur = uni.get(tk)
+            if cur is None or CAP_ORDER[cap] < CAP_ORDER[cur["cap"]]:
+                uni[tk] = {"name": name, "sector": sec or (cur or {}).get("sector"), "bench": "us", "cap": cap}
+        print(f"  {key}: {len(rows or [])}종목")
+    # 내 종목 (한 줄에: 티커 [업종명])  예) 005930.KS 반도체 / OUST 로봇·자율주행
     path = os.path.join(HERE, "my_tickers.txt")
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
@@ -103,12 +169,14 @@ def load_universe(quick=False):
             parts = line.split(maxsplit=1)
             tk = parts[0].upper()
             b = "ks" if tk.endswith(".KS") else "kq" if tk.endswith(".KQ") else "us"
-            info = uni.get(tk, {"name": tk, "sector": None, "bench": b})
+            info = uni.get(tk, {"name": tk, "sector": None, "bench": b, "cap": "기타"})
+            info["mine"] = True
             if len(parts) > 1:
-                info["mysector"] = parts[1]
+                info["mysector"] = parts[1].strip()
             uni[tk] = info
     if not uni:
         sys.exit("종목 목록이 비어 있습니다. 인터넷 연결 또는 my_tickers.txt를 확인하세요.")
+    print(f"총 {len(uni)}종목")
     return uni
 
 
@@ -479,20 +547,23 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         df = dfs.get(t)
         if df is None:
             continue
-        if df["Close"].iloc[-1] < CFG["min_price"] and info["bench"] == "us":
-            continue
-        if info["bench"] == "us" and (df["Close"] * df["Volume"]).iloc[-10:].mean() < CFG["min_dollar_vol"]:
-            continue
+        if not info.get("mine") and info["bench"] == "us":
+            if df["Close"].iloc[-1] < CFG["min_price"]:
+                continue
+            if (df["Close"] * df["Volume"]).iloc[-10:].mean() < CFG["min_dollar_vol"]:
+                continue
         s = stage_of(df)
         if not s:
             continue
         b = bench.get(info["bench"])
         s["rs"], s["rs4"] = mansfield(df["Close"], b) if b is not None else (None, None)
-        etf = SECTOR_ETF.get(info.get("sector") or "")
+        etf = MYSECTOR_ETF.get(info.get("mysector") or "")
+        if not etf or etf not in sectors:
+            etf = SECTOR_ETF.get(info.get("sector") or "")
         sec = sectors.get(etf) if etf else None
         m_stage = worst if info["bench"] == "us" else None
         score, bd, caps = score_stock(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None)
-        s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps,
+        s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
                  sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),
                  sector_etf=etf, sector_stage=sec["stage"] if sec else None,
                  volGrade=grade_from(bd["volume"], 15), rsGrade=grade_from(bd["rs"], 15),

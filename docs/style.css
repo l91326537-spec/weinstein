@@ -111,3 +111,4 @@ table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:ta
 th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
 th{font-size:11px;color:var(--muted)}td.l,th.l{text-align:left}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.capt{font-size:10px;font-weight:700;color:var(--s1);background:var(--s1bg);border-radius:4px;padding:0 4px;margin-right:2px}

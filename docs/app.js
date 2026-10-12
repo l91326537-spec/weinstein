@@ -216,22 +216,25 @@ function candItem(c, rank) {
   const tgt = c.signal === "풀백" && c.pullback ? `${fmt(c.pullback[0])}~${fmt(c.pullback[1])}` : fmt(c.buyStop);
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
-    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.signal)}</span>` : ""}<div class="n">${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
+    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.signal)}</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
     <span class="sub"><span>${c.signal === "풀백" ? "풀백" : "매수 스톱"} <b>${tgt}</b></span><span>손절 <b>${fmt(c.stop)}</b> (${pct(c.stopPct)})</span><span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급</span></span></a>`;
 }
 
 /* ---------- 화면: 후보 ---------- */
-let candTab = "돌파";
+let candTab = "돌파", capTab = "전체";
 function viewCands(v) {
   const tabs = ["돌파", "풀백", "베이스 대기", "65점+"];
-  const list = SUM.candidates.filter(c => candTab === "65점+" ? c.score >= 65 : c.signal === candTab).sort((a, b) => b.score - a.score);
+  const capOk = c => capTab === "전체" || c.cap === capTab || (capTab === "내 종목" && c.mine);
+  const list = SUM.candidates.filter(c => capOk(c) && (candTab === "65점+" ? c.score >= 65 : c.signal === candTab)).sort((a, b) => b.score - a.score);
   const desc = { "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선(-3~+5%)이나 돌파 지점(±3%)까지 되돌림", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
   v.innerHTML = `<h1>후보</h1>
-    <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => t === "65점+" ? c.score >= 65 : c.signal === t).length}</button>`).join("")}</div>
+    <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && (t === "65점+" ? c.score >= 65 : c.signal === t)).length}</button>`).join("")}</div>
+    <div class="seg" role="group">${["전체", "대형", "중형", "소형", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
     <p class="note">${desc} · 점수 순${SUM.worst === 4 ? " · <b style='color:var(--s4)'>시장 4단계라 신규 매수 보류</b>" : ""}</p>
     ${list.length ? `<div class="list">${list.map(c => candItem(c)).join("")}</div>` : `<div class="empty">해당 종목이 없습니다.</div>`}`;
   v.querySelectorAll("[data-ct]").forEach(b => b.onclick = () => { candTab = b.dataset.ct; viewCands(v); });
+  v.querySelectorAll("[data-cap]").forEach(b => b.onclick = () => { capTab = b.dataset.cap; viewCands(v); });
 }
 
 /* ---------- 화면: 종목 ---------- */

@@ -265,7 +265,7 @@ def line_svg(series, w=1000, h=320):
     return "".join(parts) + f'<div class="leg">{leg}</div>'
 
 
-def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None):
+def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -304,6 +304,15 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         P.append("</table></div>")
         if exit_curves:
             P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
+    if seg:
+        P.append(f"<h2>대형 · 중형 · 소형 비교</h2><div class=mut style='margin-bottom:6px'>{e(best or '')} 규칙으로 크기별 종목만 따로 돌린 결과. "
+                 "대형=S&P500·나스닥100, 중형=S&P400, 소형=러셀2000. 소형주일수록 생존 편향이 커서 실제보다 좋게 나오는 점을 감안하세요.</div>"
+                 "<div class=tw><table><tr><th class=l>구분</th><th>종목 수</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>신호당 평균 R</th><th>신호 3R 이상</th></tr>")
+        for r in seg:
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b></td><td>{r['n_t']}</td><td>{sgn(r['c'].get('cagr'))}</td><td>{sgn(r['c'].get('mdd'))}</td>"
+                     f"<td>{r['t'].get('n', 0)}</td><td>{f_(r['t'].get('win'), 0, True)}</td><td>{f_(r['t'].get('avgR'), 2)}</td>"
+                     f"<td>{f_(r['s'].get('avgR'), 2)}</td><td>{f_(r['s'].get('big'), 0, True)}</td></tr>")
+        P.append("</table></div>")
     st = cstats["전략"]; tt = tstats
     P.append("<h2>한눈에</h2><div class=kp>"
              f"<div><span>연평균 수익률</span><b class=big>{sgn(st.get('cagr'))}</b></div>"
@@ -401,6 +410,17 @@ def main(argv=None, fetch=None, universe=None):
     best = max(comp, key=lambda r: (r["c"].get("cagr") or -99))["name"]
     EXIT.clear(); EXIT.update(EXITS[best])
     sig, eq, trades = runs[best]
+    capmap = {t: v.get("cap", "기타") for t, v in uni.items()}
+    sig["cap"] = sig["ticker"].map(capmap)
+    seg = []
+    for cp in ("대형", "중형", "소형"):
+        ss = sig[sig["cap"] == cp]
+        if ss.empty:
+            continue
+        e3, t3 = run_portfolio(ss, frames, cal, args.min_score)
+        cl3 = ss[~ss["dup"]]
+        seg.append(dict(name=cp, n_t=int(ss["ticker"].nunique()), c=stats_curve(e3["equity"]), t=stats_trades(t3), s=stats_trades(cl3)))
+        print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -433,7 +453,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
