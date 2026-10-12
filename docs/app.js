@@ -69,22 +69,13 @@ function weekIndex(w, date) { // date가 들어 있는 주봉 인덱스
   return k;
 }
 function trailStop(w, h) {
+  /* 백테스트에서 가장 나았던 규칙: 초기 손절(돌파 -5%, 풀백 = 3주 저점·30주선 아래)만 두고 4단계가 될 때까지 보유 */
   const buy = +h.buyPrice, s0 = +h.initStop;
-  let s = s0, be = false, broke = null;
+  let broke = null;
   const k = weekIndex(w, h.buyDate);
-  if (k < 0) return { stop: s, phase: "초기 손절", broke, held: 0 };
-  const risk = buy - s0;
-  for (let j = k; j < w.length; j++) {
-    if (j > k && w[j][W.l] <= s) { broke = w[j][W.d]; break; }
-    const held = j - k, c = w[j][W.c];
-    if (!be && (c >= buy + risk || (held >= 3 && c > buy))) { be = true; s = Math.max(s, buy * 1.002); }
-    if (be) {
-      let lo = Infinity; for (let q = Math.max(0, j - 7); q <= j; q++) lo = Math.min(lo, w[q][W.l]);
-      s = Math.max(s, Math.max(w[j][W.ma] || 0, lo) * 0.99);
-    }
-  }
-  const phase = !be ? "초기 손절" : s <= buy * 1.0025 ? "본전" : "추적 손절";
-  return { stop: s, phase, broke, held: w.length - 1 - k, risk };
+  if (k < 0) return { stop: s0, phase: "초기 손절", broke, held: 0, risk: buy - s0 };
+  for (let j = k + 1; j < w.length; j++) if (w[j][W.l] <= s0) { broke = w[j][W.d]; break; }
+  return { stop: s0, phase: "초기 손절 · 4단계까지 보유", broke, held: w.length - 1 - k, risk: buy - s0 };
 }
 function holdStatus(td, h) {
   const w = td.w, last = w[w.length - 1], close = last[W.c];
@@ -92,7 +83,7 @@ function holdStatus(td, h) {
   const dist = (close - tr.stop) / close * 100;
   let st = { t: "정상", c: "st2" };
   if (tr.broke) st = { t: "손절 이탈", c: "st4" };
-  else if (td.stage === 4) st = { t: "4단계 · 매도 검토", c: "st4" };
+  else if (td.stage === 4) st = { t: "4단계 · 매도", c: "st4" };
   else if (dist < 3) st = { t: "손절 근접", c: "st3" };
   else if (td.stage === 3) st = { t: "3단계 경고", c: "st3" };
   const ref = tr.broke ? tr.stop : close;     // 손절을 깼으면 손절가에 판 것으로 계산
@@ -212,13 +203,18 @@ async function renderAlerts() {
   el.hidden = false;
   el.innerHTML = `<h2>보유 종목 점검</h2>${out.length ? `<div class="list">${out.join("")}</div>` : `<div class="ok">보유 ${H.length}종목 모두 정상</div>`}`;
 }
+function planLines(c) {
+  const out = [];
+  if (c.bkBuy) out.push(`<span>돌파 매수 <b>${fmt(c.bkBuy)}</b>~${fmt(c.bkMax)} · 손절 <b>${fmt(c.bkStop)}</b>${c.bkStatus === "추격 한도 넘음" ? " <span class='tag'>추격 금지</span>" : ""}</span>`);
+  if (c.pbZone) out.push(`<span>풀백 매수 <b>${fmt(c.pbZone[0])}~${fmt(c.pbZone[1])}</b> · 손절 <b>${fmt(c.pbStop)}</b>${c.pbNow ? " <span class='tag good'>지금</span>" : ""}</span>`);
+  return out.join("");
+}
 function candItem(c, rank) {
-  const tgt = c.signal === "풀백" && c.pullback ? `${fmt(c.pullback[0])}~${fmt(c.pullback[1])}` : fmt(c.buyStop);
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
     <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.signal)}</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
-    <span class="sub"><span>${c.signal === "풀백" ? "풀백" : "매수 스톱"} <b>${tgt}</b></span><span>손절 <b>${fmt(c.stop)}</b> (${pct(c.stopPct)})</span><span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급</span></span></a>`;
+    <span class="sub" style="display:grid;gap:2px">${planLines(c)}<span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급${c.brkVr ? ` · 돌파 주 거래량 <b>${fmt(c.brkVr, 1)}배</b>` : ""}</span></span></a>`;
 }
 
 /* ---------- 화면: 후보 ---------- */
@@ -263,10 +259,16 @@ async function viewStock(v, t) {
   try { td = await loadT(t); } catch (e) { v.querySelector(".empty").textContent = `${t} 데이터가 없습니다.`; return; }
   const w = td.w, last = w[w.length - 1], prev = w[w.length - 2];
   const s = store.get().settings;
-  const entry = num(td.buyStop) && td.close < td.buyStop ? td.buyStop : td.close;
-  const risk = num(td.stop) ? entry - td.stop : null;
+  /* 추천 수량: 지금 신호의 매수가·손절 기준 (풀백이면 현재가와 풀백 손절, 아니면 돌파 매수가와 돌파 손절) */
+  const usePb = td.signal === "풀백" && td.pbStop;
+  const entry = usePb ? td.close : (td.bkBuy && td.close < td.bkBuy ? td.bkBuy : td.close);
+  const stopFor = usePb ? td.pbStop : (td.bkStop || td.stop);
+  const risk = num(stopFor) ? entry - stopFor : null;
   const acct = isKRW(t) ? s.account : s.account / fxRate();   // 계좌(원)를 종목 통화로
-  const qty = risk > 0 ? Math.floor(acct * s.riskPct / 100 / risk) : null;
+  const qtyRisk = risk > 0 ? Math.floor(acct * s.riskPct / 100 / risk) : null;
+  const qtyCap = entry > 0 ? Math.floor(acct * 0.25 / entry) : null;      // 한 종목 최대 계좌 25%
+  const capped = qtyRisk != null && qtyCap != null && qtyRisk > qtyCap;
+  const qty = capped ? qtyCap : qtyRisk;
   const qtyAmt = qty ? Math.round(toKRW(qty * entry, t)) : null;
   const viol = td.score != null ? ruleCheck(td) : [];
   const bd = td.breakdown, parts = [["market", "시장", 10], ["sector", "업종", 20], ["stock", "진입 위치", 25], ["volume", "거래량", 25], ["rs", "RS", 10], ["risk", "손절폭", 10]];
@@ -285,13 +287,16 @@ async function viewStock(v, t) {
   </section>
   ${td.score != null ? `<section class="card"><h3>매수 계획</h3>
     <div class="kv">
-      <div><span>매수 스톱</span><b style="color:var(--s2)">${td.close >= (td.buyStop || Infinity) ? "돌파함" : fmt(td.buyStop)}</b><small>${num(td.buyStop) && td.close < td.buyStop ? pct((td.buyStop / td.close - 1) * 100) : ""}</small></div>
-      <div><span>풀백 구간</span><b style="color:var(--s2)">${td.pullback ? fmt(td.pullback[0]) + "~<wbr>" + fmt(td.pullback[1]) : "–"}</b></div>
-      <div><span>손절</span><b style="color:var(--s4)">${fmt(td.stop)}</b><small>${pct(td.stopPct)}</small></div>
+      <div><span>돌파 매수가</span><b style="color:var(--s2)">${td.bkBuy ? fmt(td.bkBuy) : "–"}</b><small>${td.bkStatus ? esc(td.bkStatus) : ""}</small></div>
+      <div><span>추격 한도</span><b>${td.bkMax ? fmt(td.bkMax) : "–"}</b><small>이 위면 사지 않기</small></div>
+      <div><span>돌파 손절 (-5%)</span><b style="color:var(--s4)">${td.bkStop ? fmt(td.bkStop) : "–"}</b></div>
+      <div><span>풀백 매수 구간</span><b style="color:var(--s2)">${td.pbZone ? fmt(td.pbZone[0]) + "~<wbr>" + fmt(td.pbZone[1]) : "–"}</b><small>${td.pbNow ? "지금 구간 안" : "30주선~+5%"}</small></div>
+      <div><span>풀백 손절</span><b style="color:var(--s4)">${td.pbStop ? fmt(td.pbStop) : "–"}</b><small>${td.pbNow ? "3주 저점·30주선 아래" : "30주선 -3%"}</small></div>
+      ${td.rtZone ? `<div><span>돌파 지점 되돌림</span><b style="color:var(--s2)">${fmt(td.rtZone[0])}~<wbr>${fmt(td.rtZone[1])}</b></div>` : ""}
       <div><span>30주선 이격</span><b style="${td.ext >= 20 ? "color:var(--s4)" : ""}">${pct(td.ext)}</b></div>
       <div><span>추천 수량 (${s.riskPct}% 위험)</span><b>${qty ? qty.toLocaleString() + "주" : "–"}</b><small>${qtyAmt ? "약 " + (qtyAmt / 10000).toFixed(0) + "만원" : ""}</small></div>
     </div>
-    <p class="note">추천 수량: ${isKRW(t) ? "" : "환율 " + fmt(fxRate(), 0) + "원 기준, "}손절 시 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원의 ${s.riskPct}%만 잃는 수량${qtyAmt && qtyAmt > s.account * 0.25 ? " · 계좌의 25%를 넘으니 줄이세요" : ""}</p>
+    <p class="note">추천 수량: ${isKRW(t) ? "" : "환율 " + fmt(fxRate(), 0) + "원 기준, "}손절 시 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원의 ${s.riskPct}%만 잃는 수량${capped ? " · 손절폭이 좁아 계좌의 25%로 줄였어요" : ""}</p>
     ${viol.length ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}</div>` : `<div class="ok">와인스테인 기본 조건 통과</div>`}
     <div class="btns">${held ? `<a class="btn" href="#hold">보유 중 · 손절 관리 보기</a>` : `<button class="btn primary" id="buyBtn">매수 기록</button>`}</div>
   </section>
@@ -319,7 +324,8 @@ function openSheet(html, bind) {
 }
 function closeSheet() { const sh = $("#sheet"); sh.hidden = true; sh.innerHTML = ""; }
 function buySheet(td, qty, viol, edit) {
-  const h = edit || { buyDate: today(), buyPrice: td.close, initStop: td.stop, shares: qty || "" };
+  const defStop = td.signal === "돌파" ? td.close * 0.95 : td.signal === "풀백" && td.pbStop ? td.pbStop : td.stop;
+  const h = edit || { buyDate: today(), buyPrice: td.close, initStop: +(+defStop).toFixed(2), shares: qty || "" };
   openSheet(`<h2>${edit ? "보유 수정" : "매수 기록"} · <span class="mono">${esc(td.t)}</span></h2>
     ${viol?.length && !edit ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}<br>그래도 기록하면 일지에 '규칙 위반'으로 표시돼요.</div>` : ""}
     <form class="form" id="bf">
@@ -375,7 +381,7 @@ function confirmSheet(msg, onYes) {
 async function viewHold(v) {
   const d = store.get(), H = d.holdings;
   v.innerHTML = `<div class="row between"><h1>보유</h1><a class="btn sm" href="#settings">설정·백업</a></div>
-    <p class="note">손절선은 매주 자동으로 올라가요: 초기 손절 → 수익이 손절폭만큼 나거나 3주 이상 수익이면 본전 → 30주선·최근 8주 저점 아래로 추적. 내리지 않습니다.</p>
+    <p class="note">백테스트에서 가장 나았던 규칙을 써요: 초기 손절(돌파 매수 -5%, 풀백 매수 = 3주 저점·30주선 아래)만 지키고, 그 뒤엔 종목이 4단계가 될 때까지 보유해요. 4단계가 되면 '4단계 · 매도'로 표시돼요.</p>
     ${H.length > d.settings.maxPos ? `<div class="warn">보유 ${H.length}종목 · 설정한 최대 ${d.settings.maxPos}종목을 넘었어요</div>` : ""}
     <div class="list" id="hl">${H.length ? H.map(h => `<div class="card" data-id="${h.id}"><div class="muted">${esc(h.t)} 계산 중…</div></div>`).join("") : `<div class="empty">보유 종목이 없습니다.<br>종목 화면에서 '매수 기록'을 누르면 여기서 손절선을 관리해요.</div>`}</div>`;
   for (const h of H) {

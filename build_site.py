@@ -53,16 +53,41 @@ def series_payload(df, bench, weeks=156):
     return out
 
 
+def buy_plan(r):
+    """돌파 매수가·추격 한도·손절, 풀백 매수 구간·손절"""
+    bs, chase = S.CFG["breakout_stop_pct"], S.CFG["breakout_chase_pct"]
+    c, res, bl, ma = r["close"], r.get("res"), r.get("brk_level"), r.get("ma30")
+    plan = {}
+    if res and c <= res:
+        b = res * 1.005
+        plan.update(bkStatus="돌파 대기", bkBuy=r2(b), bkMax=r2(res * (1 + chase / 100)), bkStop=r2(b * (1 - bs / 100)))
+    elif bl:
+        b = bl * 1.005
+        ok = c <= bl * (1 + chase / 100)
+        plan.update(bkStatus="돌파함 · 매수 가능" if ok else "추격 한도 넘음", bkBuy=r2(b), bkMax=r2(bl * (1 + chase / 100)),
+                    bkStop=r2((c if ok else b) * (1 - bs / 100)))
+    if r["stage"] in (1, 2) and ma:
+        lo, hi = ma, ma * 1.05
+        if bl and ma * 1.05 < bl * 0.97 < ma * 1.25:
+            plan["rtZone"] = [r2(bl * 0.97), r2(bl * 1.03)]          # 돌파 지점 되돌림 구간
+        in_pb = r.get("signal") == "풀백"
+        pstop = S.entry_stop(r, "풀백") if in_pb else ma * 0.97
+        plan.update(pbZone=[r2(lo), r2(hi)], pbStop=r2(pstop), pbNow=in_pb)
+    return plan
+
+
 def stock_payload(r):
     pz = None
     if r["stage"] == 2 and r.get("ma30"):
         pz = [r2(r["ma30"]), r2(max(r["ma30"] * 1.05, r.get("brk_level") or 0))]
-    return dict(score=r["score"], stage=r["stage"], label=r["stage_label"], signal=r["signal"],
-                close=r2(r["close"]), ma30=r2(r["ma30"]), ext=r2(r["ext"], 1), slope=r2(r["slope"], 1),
-                res=r2(r["res"]), buyStop=r2(r["buy_stop"]), pullback=pz, stop=r2(r["stop"]),
-                stopPct=r2(r["stop_pct"], 1), rs=r2(r["rs"], 1), vr=r2(r["vr"], 1),
-                volGrade=r["volGrade"], rsGrade=r["rsGrade"], breakdown=r["breakdown"], caps=r["caps"],
-                sectorStage=r.get("sector_stage"))
+    d = dict(score=r["score"], stage=r["stage"], label=r["stage_label"], signal=r["signal"],
+             close=r2(r["close"]), ma30=r2(r["ma30"]), ext=r2(r["ext"], 1), slope=r2(r["slope"], 1),
+             res=r2(r["res"]), buyStop=r2(r["buy_stop"]), pullback=pz, stop=r2(r["stop"]),
+             stopPct=r2(r["stop_pct"], 1), rs=r2(r["rs"], 1), vr=r2(r["vr"], 1), brkVr=r2(r.get("brk_vr"), 1),
+             volGrade=r["volGrade"], rsGrade=r["rsGrade"], breakdown=r["breakdown"], caps=r["caps"],
+             sectorStage=r.get("sector_stage"))
+    d.update(buy_plan(r))
+    return d
 
 
 def main(fetch=None, universe=None):

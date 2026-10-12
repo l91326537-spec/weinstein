@@ -32,7 +32,7 @@ CFG = {
     "stop_lookback": 10,     # 손절 기준 저점을 찾을 기간(주)
     "min_price": 5.0,        # 이 가격 미만 종목 제외
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
-    "breakout_stop_pct": 3.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
+    "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
     "breakout_chase_pct": 7.0, # 돌파 지점보다 이 % 넘게 올라가 있으면 '돌파 매수'로 보지 않음 (추격 금지)
     "min_stop_pct": 3.0,       # 손절은 매수가보다 최소 이만큼 아래
 }
@@ -470,7 +470,7 @@ def signal_v2(s):
     bl = s.get("brk_level")
     if st == 2 and s["brk_week"] and (s["brk_vr"] or 0) >= 1.5 and bl and c <= bl * (1 + CFG["breakout_chase_pct"] / 100) and ext <= 15:
         return "돌파"
-    if st == 2 and s["slope"] > 0 and (-3 <= ext <= 5 or (bl and abs(c / bl - 1) <= 0.03)):
+    if st == 2 and s["slope"] > 0 and (-3 <= ext <= 5 or (bl and abs(c / bl - 1) <= 0.03 and ext <= 12)):
         return "풀백"
     if st == 1 and c >= s["res"] * 0.95 and s["rs"] is not None and s["rs4"] is not None and s["rs"] > s["rs4"]:
         return "베이스 대기"
