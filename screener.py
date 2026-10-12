@@ -37,6 +37,8 @@ CFG = {
     "base_bonus": 4,         # 기저 26주 이상 돌파 가점
     "base_short": 8,         # 기저 26주 미만 돌파 감점
     "use_late": True,        # 2단계 후반 감점 (백테스트 결과로 결정)
+    "use_trend": True,       # 풀백: 30주선 기울기 약함·최근 이탈 감점 (백테스트 결과로 결정)
+    "use_pattern": True,     # 역헤드앤숄더 돌파 가점·헤드앤숄더 천장 감점 (백테스트 결과로 결정)
     "use_base": True,        # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
     "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
@@ -337,8 +339,57 @@ def indicators(df):
     atrp = f["atr10"] / c
     prev = atrp.shift(40).rolling(52, min_periods=20).median()       # 급등 전(약 1년 전) 평소 변동폭
     jump = (c / c.shift(1) - 1).rolling(52, min_periods=1).max() >= 0.12
+    # 추세 품질: 30주선 13주 상승률, 최근 13주 동안 종가가 30주선 아래로 가장 많이 내려간 정도
+    f["ma_up13"] = (ma / ma.shift(13) - 1) * 100
+    f["min_rel13"] = (c / ma).rolling(13).min()
+    f["ihs"], f["hs_top"] = patterns(h, l, c)
     f["pinned"] = ((h.rolling(8).max() / l.rolling(8).min() - 1 <= 0.07) & (atrp <= 0.03) & (atrp <= prev * 0.45) & jump).astype(float)
     return f
+
+
+def _pivots(x, k, low):
+    """k주 양옆보다 낮은(높은) 주 = 바닥(꼭지). k주 뒤에야 확정됨"""
+    r = x.rolling(2 * k + 1, center=True)
+    m = (x == (r.min() if low else r.max())).values
+    out = []
+    for j in np.nonzero(m)[0]:
+        if not out or j - out[-1] > k:          # 같은 값이 이어진 바닥·꼭지는 하나로
+            out.append(int(j))
+    return out
+
+
+def patterns(h, l, c, k=3):
+    """역헤드앤숄더 돌파(최근 3주 안), 헤드앤숄더 천장 완성(최근 8주 안). 각 주에는 그 주까지 확정된 꼭지·바닥만 사용"""
+    n = len(c)
+    ihs, hs = np.zeros(n), np.zeros(n)
+    lows, highs = _pivots(l, k, True), _pivots(h, k, False)
+    lv, hv, cv = l.values, h.values, c.values
+    import bisect
+    def last3(piv, i):
+        m = bisect.bisect_right(piv, i - k)              # i주까지 확정된 꼭지·바닥 개수
+        if m < 3 or i - piv[m - 3] > 60:
+            return None
+        return piv[m - 3:m]
+    li = hi = 0
+    for i in range(n):
+        t = last3(lows, i)
+        if t:
+            a, b, d = t
+            sh1, head, sh2 = lv[a], lv[b], lv[d]
+            if d - a >= 8 and head < min(sh1, sh2) * 0.97 and abs(sh1 / sh2 - 1) <= 0.12:
+                neck = hv[a:d + 1].max()
+                for j in range(max(d + 1, i - 2), i + 1):          # 최근 3주 안에 목선 위로 종가 돌파
+                    if cv[j] > neck and cv[j - 1] <= neck:
+                        ihs[i] = 1
+        t = last3(highs, i)
+        if t:
+            a, b, d = t
+            sh1, head, sh2 = hv[a], hv[b], hv[d]
+            if d - a >= 8 and head > max(sh1, sh2) * 1.03 and abs(sh1 / sh2 - 1) <= 0.12:
+                neck = lv[a:d + 1].min()
+                if any(cv[j] < neck for j in range(max(d + 1, i - 7), i + 1)):   # 최근 8주 안에 목선 아래로 이탈
+                    hs[i] = 1
+    return pd.Series(ihs, index=c.index), pd.Series(hs, index=c.index)
 
 
 def late_stage(r):
@@ -350,7 +401,7 @@ def late_stage(r):
 def quality_adj(s, signal=None):
     """기저 품질·2단계 진행도 가감점과 인수합병 의심 여부. 반환: dict(late, base, pinned, notes)
     백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
-    out = dict(late=0, base=0, pinned=bool(s.get("pinned")), notes=[])
+    out = dict(late=0, base=0, trend=0, pat=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
@@ -359,6 +410,17 @@ def quality_adj(s, signal=None):
     if late_stage(s):
         out["late"] = -CFG["late_pts"]
         out["notes"].append(f"2단계 후반 -{CFG['late_pts']} (30주선 {int(s.get('ma_up_weeks') or 0)}주째 상승 · 52주 +{(s.get('ma_rise52') or 0):.0f}%)")
+    if CFG["use_trend"] and signal == "풀백":
+        up13, mr = s.get("ma_up13"), s.get("min_rel13")
+        if up13 is not None and not pd.isna(up13) and up13 < 3:
+            out["trend"] = out.get("trend", 0) - 8; out["notes"].append(f"30주선 기울기 약함 (13주 {up13:+.1f}%) -8")
+        if mr is not None and not pd.isna(mr) and mr < 0.97:
+            out["trend"] = out.get("trend", 0) - 10; out["notes"].append(f"최근 13주 안에 30주선 이탈 ({(mr - 1) * 100:.0f}%) -10")
+    if CFG["use_pattern"]:
+        if s.get("ihs") and signal == "돌파":
+            out["pat"] = 5; out["notes"].append("역헤드앤숄더 목선 돌파 +5")
+        if s.get("hs_top"):
+            out["pat"] = out.get("pat", 0) - 10; out["notes"].append("헤드앤숄더 천장 완성 -10")
     if signal == "돌파":
         bl = s.get("base_len") or 0
         if bl >= 26:
@@ -371,7 +433,7 @@ def quality_adj(s, signal=None):
 def apply_quality(score, q, use_late=True, use_base=True):
     if q["pinned"]:
         return min(score, 20)
-    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0))))
+    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0))))
 
 
 def classify(r):
@@ -404,6 +466,8 @@ def classify(r):
         label = "2단계 (과열)"
     elif st == 2 and late_stage(r):
         label = "2단계 후반"
+    elif st == 2 and not pd.isna(r.get("ma_up13", np.nan)) and r.get("ma_up13") < 1 and not brk:
+        label = "2단계? (30주선 평평)"
     elif st == 2 and brk:
         label = "2단계 돌파"
     elif st == 2 and not above:
@@ -780,7 +844,8 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
         q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
-        caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)]
+        caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)
+                       or "30주선" in n or "헤드앤숄더" in n]
         if q["pinned"]:
             sig2 = ""
         s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100

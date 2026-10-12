@@ -71,10 +71,10 @@ def build_frames(dfs, uni):
         else:
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
-        qL, qB, qP = [], [], []
+        qL, qB, qP, qT, qPt = [], [], [], [], []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -93,11 +93,14 @@ def build_frames(dfs, uni):
             sigs2.append(g2 if ok else "")
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
+            qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0))
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
         Bp = np.where(B > 0, 4, np.where(B < 0, -8, 0))
-        for name, a in (("P", 0 * L), ("L15", -15 * L), ("L8", -8 * L), ("BB", Bp), ("L8BB", -8 * L + Bp)):
+        T, Pt = np.array(qT, float), np.array(qPt, float)
+        base = -8 * L + Bp
+        for name, a in (("L8BB", base), ("T", base + T), ("Pt", base + Pt), ("TPt", base + T + Pt)):
             v = np.clip(s2 + a, 0, 100)
             f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
@@ -544,7 +547,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
          f"<h1>와인스테인 백테스트</h1><div class=mut>{e(args.start)} ~ {dt.date.today()} · 점수 {args.min_score}점 이상 · "
          f"신호 {', '.join(BT['signals'])} · 1회 손절 시 계좌 {BT['risk_pct']}% · 최대 {BT['max_pos']}종목 · 비용 편도 {BT['cost_pct']}%</div>"]
     if comp:
-        P.append("<h2>기저 길이 · 2단계 후반 · 인수합병 필터 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
+        P.append("<h2>30주선 추세 조건 · 헤드앤숄더 패턴 비교</h2><div class=mut style='margin-bottom:6px'>모두 6종목 · 소형주 제외 · 남는 돈은 QQQ(시장 4단계면 매도) · 돌파 매수 스톱 -5% · 풀백은 30주선 근처 · 4단계까지 보유. 점수만 바꿨어요. "
                  f"아래 나머지 표는 연평균÷최대낙폭이 가장 좋았던 <b>{e(best)}</b> 기준입니다. '75점+ R'이 '65점 미만 R'보다 커야 점수표가 의미 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>조합</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>3R 이상</th><th>평균 보유(주)</th><th>75점+ R</th><th>65점 미만 R</th></tr>")
         for r in comp:
@@ -643,7 +646,7 @@ def main(argv=None, fetch=None, universe=None):
         sys.exit("S&P500 지수 데이터를 받지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
     frames, market = build_frames(dfs, uni)
     cal = dfs["^GSPC"].index[dfs["^GSPC"].index >= start]
-    print("기저·2단계 후반 점수별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
+    print("추세 조건·패턴 점수별로 돌리는 중... (매수: 돌파 매수 스톱·-5% / 풀백, 4단계까지 보유)")
     EXIT.clear(); EXIT.update(EXITS["E 4단계까지 보유"])
     STOP.clear(); STOP.update(mode="entry", pct=S.CFG["breakout_stop_pct"])
     base_sig = collect_variant(frames, start, "base", "stop")
@@ -659,14 +662,13 @@ def main(argv=None, fetch=None, universe=None):
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
     OUT = dict(out=True)
-    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "P", "L15", "L8", "BB", "L8BB")}
+    sigs = {k: CV(small=OUT, score_col="score2" + k) for k in ("", "L8BB", "T", "Pt", "TPt")}
     GRID = [  # (이름, 최대 보유 종목 수, 남는 돈 채우기, 설명, 신호, 소형주 최대 종목 수)
-        ("지금 점수", 6, q, "v2 점수 그대로 (소형주 제외)", "", None),
-        ("+ 인수합병 의심 제외", 6, q, "1년 안에 한 주 +12% 급등 뒤 8주 범위 7% 이내로 가격이 고정된 종목은 20점 상한", "P", None),
-        ("+ 2단계 후반 -15", 6, q, "인수합병 제외 + 30주선이 40주 넘게 오르거나 52주 최저 대비 +60% 넘으면 -15점", "L15", None),
-        ("+ 2단계 후반 -8", 6, q, "같은 조건, 감점만 -8", "L8", None),
-        ("+ 돌파 기저 가감점", 6, q, "인수합병 제외 + 돌파 신호만: 기저 26주 이상이면 +4, 짧으면 -8", "BB", None),
-        ("+ 후반 -8 + 돌파 기저", 6, q, "위 두 가지 모두", "L8BB", None),
+        ("v2 기본 점수", 6, q, "가감점 없음 (소형주 제외)", "", None),
+        ("지금 앱 점수", 6, q, "인수합병 제외 · 2단계 후반 -8 · 돌파 기저 26주+ +4 / 짧으면 -8", "L8BB", None),
+        ("+ 풀백 추세 조건", 6, q, "풀백인데 30주선 13주 상승률 3% 미만이면 -8, 최근 13주 안에 종가가 30주선 -3% 아래로 갔으면 -10", "T", None),
+        ("+ 패턴", 6, q, "역헤드앤숄더 목선 돌파 +5, 헤드앤숄더 천장 완성 -10", "Pt", None),
+        ("+ 추세 조건 + 패턴", 6, q, "위 두 가지 모두", "TPt", None),
     ]
     comp, runs, combos = [], {}, {}
     for name, mp_, fl, why, sk, msmall in GRID:
