@@ -380,6 +380,15 @@ def ext_study(frames, start, capmap, score_col="score2TPt", min_sc=60):
     return res
 
 
+def _open_near(o, d, days=3):
+    """d 주의 시가. 종목마다 주봉 날짜가 하루쯤 어긋날 수 있어 ±days 안에서 가장 가까운 주를 씀"""
+    v = o.reindex([d]).iloc[0]
+    if pd.notna(v):
+        return v
+    w = o[(o.index >= d - pd.Timedelta(days=days)) & (o.index <= d + pd.Timedelta(days=days))].dropna()
+    return w.iloc[0] if len(w) else np.nan
+
+
 def etf_timing(dfs, tickers, cal, maxn=1, enter=(2,), exit_=(4,), rank="rs", bench=None):
     """ETF를 와인스테인식으로: 지난주 단계가 enter면 이번 주 시가에 매수(빈자리·RS 순), exit면 매도. 같은 비중"""
     cost = BT["cost_pct"] / 100
@@ -403,12 +412,12 @@ def etf_timing(dfs, tickers, cal, maxn=1, enter=(2,), exit_=(4,), rank="rs", ben
                 cash += pos.pop(t) * px * (1 - cost); trades += 1
         # 매수
         eq = cash + sum(n * info[t]["c"].asof(d) for t, n in pos.items() if pd.notna(info[t]["c"].asof(d)))
-        cands = [t for t in info if t not in pos and prev[t][0] in enter and pd.notna(info[t]["o"].reindex([d]).iloc[0])]
+        cands = [t for t in info if t not in pos and prev[t][0] in enter and pd.notna(_open_near(info[t]["o"], d))]
         cands.sort(key=lambda t: -(prev[t][1] if pd.notna(prev[t][1]) else -99))
         for t in cands:
             if len(pos) >= maxn:
                 break
-            px = info[t]["o"].reindex([d]).iloc[0]
+            px = _open_near(info[t]["o"], d)
             val = min(eq / maxn, cash / (1 + cost))
             if val <= eq * 0.01:
                 break
@@ -1160,7 +1169,11 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
         if len(hs):
             sats["헬스케어 소형 포함"] = run_portfolio(hs, frames, cal, ms0, max_pos=mp, fill=fill, caps=capmap)[0]["equity"]
     if "XBI" in dfs:
-        sats["바이오 ETF(XBI) 2단계만"] = etf_timing(dfs, ["XBI"], cal, 1, (2,), (1, 3, 4), bench=dfs["^GSPC"]["Close"])[0]
+        xi = dfs["XBI"].index
+        print(f"  XBI 주봉 {len(xi)}개 · 기준 달력과 같은 날짜 {len(xi.intersection(cal))}개 · 첫 날짜 {xi[0]}")
+        xe, xn, xp = etf_timing(dfs, ["XBI"], cal, 1, (2,), (1, 3, 4), bench=dfs["^GSPC"]["Close"])
+        print(f"  XBI 2단계만: 매매 {xn}번 · 보유 기간 {xp:.0f}%")
+        sats["바이오 ETF(XBI) 2단계만"] = xe
     lev = lev_study(dfs, cal, args.start, sats)
     sc_ = sig0[sig0["score"] >= 65]
     beta_rows = [(f"[베타] 65점+ 신호 · 베타 {lab}", stats_trades(sc_[(sc_["beta"] >= lo) & (sc_["beta"] < hi)]))
