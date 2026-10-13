@@ -72,12 +72,12 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
         qL, qB, qP, qT, qPt = [], [], [], [], []
-        qC, qD = [], []
+        qC, qD, qS = [], [], []
         ddv = f["dd52"].values
         isb = []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); qS.append(0); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -97,7 +97,7 @@ def build_frames(dfs, uni):
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
             qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
-            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0))
+            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(q.get("sqz", 0))
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
@@ -107,7 +107,8 @@ def build_frames(dfs, uni):
         dd = np.nan_to_num(ddv, nan=0.0)
         ov = np.where(dd <= -25, -10, np.where(dd <= -15, -5, 0))
         ovp = np.where(np.array(isb), 0, ov)
-        cur = base + T + Pt
+        f["sqz_pts"] = np.array(qS, float)
+        cur = base + T + Pt + f["sqz_pts"].values      # 볼린저 수축 가점 (앱 점수와 같게)
         C, D = np.array(qC, float), np.array(qD, float)
         for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D)):
             v = np.clip(s2 + a, 0, 100)
@@ -941,16 +942,12 @@ def tech_indicators(frames, cal):
     """유명한 기술적 지표를 주봉으로 (각 주 금요일까지의 값만)"""
     print("기술적 지표 계산 중 (미너비니·RS 순위·RSI·MACD·ADX·볼린저)...")
     for f in frames.values():
-        if "minervini" in f:
+        if "rsi14" in f:
             continue
         c, h, l = f["close"], f["high"], f["low"]
         pc = c.shift(1)
         tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-        f["atr10"] = tr.rolling(10).mean()
-        ma30, ma40, ma10 = c.rolling(30).mean(), c.rolling(40).mean(), c.rolling(10).mean()
-        lo52, hi52 = l.rolling(52, min_periods=40).min(), h.rolling(52, min_periods=40).max()
-        f["minervini"] = ((c > ma30) & (c > ma40) & (ma30 > ma40) & (ma40 > ma40.shift(4))
-                          & (c >= lo52 * 1.3) & (c >= hi52 * 0.75)).astype(float)
+        ma40, ma10 = c.rolling(40).mean(), c.rolling(10).mean()      # 미너비니·볼린저·ATR은 screener.indicators에서 계산
         d = c.diff()
         g, ls = d.clip(lower=0).ewm(alpha=1 / 14).mean(), (-d.clip(upper=0)).ewm(alpha=1 / 14).mean()
         f["rsi14"] = 100 - 100 / (1 + g / ls)
@@ -963,8 +960,6 @@ def tech_indicators(frames, cal):
         pdi, mdi = 100 * pdm.ewm(alpha=1 / 14).mean() / atr14, 100 * mdm.ewm(alpha=1 / 14).mean() / atr14
         f["adx14"] = (100 * (pdi - mdi).abs() / (pdi + mdi)).ewm(alpha=1 / 14).mean()
         f["golden"] = (ma10 > ma40).astype(float)
-        bw = 4 * c.rolling(20).std() / c.rolling(20).mean()
-        f["squeeze"] = (bw.rolling(8).min() <= bw.rolling(52, min_periods=40).quantile(0.25)).astype(float)
     # 전체 종목 대비 순위 (그 주에 데이터가 있는 종목끼리)
     cl = pd.concat({t: f["close"] for t, f in frames.items()}, axis=1)
     r12 = (cl / cl.shift(52) - 1).rank(axis=1, pct=True) * 100
@@ -1079,7 +1074,7 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
         r = w * s1.pct_change() + (1 - w) * s2.reindex(s1.index, method="ffill").pct_change()
         return (1 + r.fillna(0)).cumprod() * 100
 
-    add("지금", f"{ms0}점 이상 · 이 규칙 그대로", (eq0, tr0))
+    add("지금", f"{ms0}점 이상 · 이 규칙 그대로 (볼린저 수축 가점 +{S.CFG['squeeze_pts']} 포함)", (eq0, tr0))
     for ms in (70, 75, 80, 85):
         if ms != ms0:
             add(f"점수 {ms}점 이상", f"매수 점수 기준만 {ms}점으로", run(sig0, ms=ms))
@@ -1109,6 +1104,12 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     for lab, desc, m in tech_masks(tk):
         add("[결합] " + lab, desc, run(sig0[m]))
     add("[결합] 샹들리에 청산", "4단계를 기다리지 않고, 매수 후 최고 종가 - ATR(10주)×3 아래로 금요일 마감하면 매도", run(CV(chand=3, **kw)))
+    # 볼린저 수축 가점 크기 (지금 = screener CFG 값)
+    sq = tag(sig0, "sqz_pts")
+    for alt in (0, 3, 8):
+        if alt != S.CFG["squeeze_pts"]:
+            add("볼린저 가점 없음" if alt == 0 else f"볼린저 가점 +{alt}", f"볼린저 수축 뒤 신호 가점을 {S.CFG['squeeze_pts']}점 대신 {alt}점으로",
+                run(sig0.assign(score=np.clip(sig0["score"] - sq + np.where(sq > 0, alt, 0), 0, 100))))
     add("시장 3단계면 신규 매수 보류", "나스닥·S&P 중 나쁜 쪽이 3단계인 주의 신호는 안 삼 (지금은 4단계만 보류)", run(sig0[sig0["mkt_s"] != 3]))
     if q_eq is not None:
         add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))

@@ -44,6 +44,7 @@ CFG = {
     "use_chop": False,       # 30주선을 자주 들락날락하는 종목 감점 (백테스트 결과로 결정)
     "use_dump": False,       # 큰 거래량 동반 급락 이력 감점 (백테스트 결과로 결정)
     "no_sector_pts": 10,     # 업종 ETF를 못 찾은 종목은 업종 점수를 중립으로
+    "squeeze_pts": 5,        # 볼린저 수축(최근 8주 안에 밴드 폭이 52주 하위 25%) 뒤 돌파·풀백 가점 (백테스트: 수축 뒤 2.39R vs 1.97R)
     "b12_pts": 10,           # 1→2단계 돌파 가점 (먼저 사도록)
     "use_base": True,        # 기저 길이 가감점 (백테스트 결과로 결정)
     "min_dollar_vol": 20e6,  # 주간 거래대금(달러) 평균이 이보다 작으면 제외 (거래 얇은 종목)
@@ -377,6 +378,15 @@ def indicators(df):
     f["failed_brk"] = fb
     f["min_rel13"] = (c / ma).rolling(13).min()
     f["ihs"], f["hs_top"] = patterns(h, l, c)
+    # 미너비니 트렌드 템플릿 (주봉판, 30주선≈150일선·40주선≈200일선): 6가지 중 몇 개 충족했나
+    ma40 = c.rolling(40).mean()
+    lo52, hi52 = l.rolling(52, min_periods=40).min(), h.rolling(52, min_periods=40).max()
+    mv = [c > ma, c > ma40, ma > ma40, ma40 > ma40.shift(4), c >= lo52 * 1.3, c >= hi52 * 0.75]
+    f["mv_n"] = sum(x.astype(int) for x in mv)
+    f["minervini"] = (f["mv_n"] == len(mv)).astype(float)
+    # 볼린저 수축: 최근 8주 안에 20주 밴드 폭이 지난 52주 중 하위 25%까지 좁아졌음
+    bbw = 4 * c.rolling(20).std() / c.rolling(20).mean()
+    f["squeeze"] = (bbw.rolling(8).min() <= bbw.rolling(52, min_periods=40).quantile(0.25)).astype(float)
     f["pinned"] = ((h.rolling(8).max() / l.rolling(8).min() - 1 <= 0.07) & (atrp <= 0.03) & (atrp <= prev * 0.45) & jump).astype(float)
     return f
 
@@ -441,6 +451,9 @@ def quality_adj(s, signal=None):
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
+    if CFG["squeeze_pts"] and signal in ("돌파", "풀백") and s.get("stage") in (1, 2) and s.get("squeeze"):
+        out["sqz"] = CFG["squeeze_pts"]
+        out["notes"].append(f"볼린저 수축 뒤 신호 +{CFG['squeeze_pts']}")
     if s.get("stage") != 2:
         return out
     if late_stage(s):
@@ -497,7 +510,7 @@ def signal_kind(s, signal):
 def apply_quality(score, q, use_late=True, use_base=True):
     if q["pinned"]:
         return min(score, 20)
-    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0)
+    return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0) + q.get("sqz", 0)
                                + (q.get("chop", 0) if CFG["use_chop"] else 0) + (q.get("dump", 0) if CFG["use_dump"] else 0))))
 
 
@@ -913,7 +926,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
         caps = caps + [n for n in q["notes"] if q["pinned"] or (CFG["use_late"] and "후반" in n) or (CFG["use_base"] and "기저" in n)
-                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n or "들락날락" in n or "급락" in n]
+                       or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n or "들락날락" in n or "급락" in n or "볼린저" in n]
         if q["pinned"]:
             sig2 = ""
         kind = signal_kind(s, sig2)
