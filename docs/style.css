@@ -35,7 +35,7 @@ button,input,select{font:inherit;color:inherit}
 .tabs a{display:grid;justify-items:center;gap:2px;padding:8px 0 6px;text-decoration:none;font-size:11px;color:var(--muted);min-height:var(--tabh)}
 .tabs svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .tabs a[aria-current="page"]{color:var(--s2);font-weight:700}
-h1{font-size:20px;margin:0}h2{font-size:16px;margin:0}h3{font-size:13px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.03em}
+h1{font-size:20px;margin:0}h2{font-size:16px;margin:0}h3{font-size:13px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.03em}h4{font-size:14px;margin:6px 0 0}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;gap:10px}
 .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .between{justify-content:space-between}
