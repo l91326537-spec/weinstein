@@ -786,7 +786,7 @@ def line_svg(series, w=1000, h=320):
 
 
 def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None,
-                 improve=None, imp_curves=None):
+                 improve=None, imp_curves=None, imp_base=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -826,7 +826,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         if exit_curves:
             P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
     if improve:
-        P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(best or '')}</b> 규칙(6종목·QQQ 채우기)에 하나씩 바꿔 본 결과. "
+        P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(imp_base or best or '')}</b> 규칙(앱 주문 요령 · 6종목 · QQQ 채우기)에 하나씩 바꿔 본 결과. "
                  f"필터는 이 20년 데이터의 신호 표를 보고 고른 것이라, 앞 기간(~{IMPROVE_SPLIT.year - 1})과 뒤 기간({IMPROVE_SPLIT.year}~) 모두에서 '지금'보다 나아야 믿을 만해요. "
                  "반반 조합은 매주 50:50으로 맞춘다고 가정했고 그 리밸런싱 비용은 빠져 있어요.</div>"
                  "<div class=tw><table><tr><th class=l>변형</th><th>연평균</th><th>최대 낙폭</th><th>연평균/최대낙폭</th><th>거래</th><th>승률</th><th>평균 R</th>"
@@ -909,6 +909,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
 
 # ---------------- 수익률 개선 후보 ----------------
 IMPROVE_SPLIT = pd.Timestamp("2016-01-01")   # 앞·뒤 기간을 나눠 필터가 두 기간 모두에서 통하는지 확인
+IMPROVE_BASE = "금요일 종가 + 비상 손절 -3%"   # 앱 주문 요령과 같은 규칙. ★는 실행마다 데이터 차이로 바뀔 수 있어 기준은 고정
 
 
 def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn):
@@ -941,8 +942,8 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     v2 = CV(vol_need=2.0, **kw)
     v15 = CV(vol_need=1.5, **kw)
     b26 = CV(min_base=26, **kw)
-    g3 = CV(max_gap=3, **kw)
-    allf = weak_out(CV(vol_need=1.5, min_base=26, max_gap=3, **kw))
+    g2 = CV(max_gap=2, **kw)
+    allf = weak_out(CV(vol_need=1.5, min_base=26, max_gap=2, **kw))
     q_eq = etf_timing(dfs, ["QQQ"], cal, 1, (1, 2, 3), (4,), bench=dfs["^GSPC"]["Close"])[0] if "QQQ" in dfs else None
 
     rows, eqs = [], {}
@@ -959,23 +960,23 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
         r = w * s1.pct_change() + (1 - w) * s2.reindex(s1.index, method="ffill").pct_change()
         return (1 + r.fillna(0)).cumprod() * 100
 
-    add("지금 ★", f"{ms0}점 이상 · 위의 ★ 규칙 그대로", (eq0, tr0))
+    add("지금", f"{ms0}점 이상 · 이 규칙 그대로", (eq0, tr0))
     add("점수 75점 이상", "매수 점수 기준만 75점으로", run(sig0, ms=75))
     add("점수 80점 이상", "매수 점수 기준만 80점으로", run(sig0, ms=80))
     add("돌파 거래량 2배 확인", "돌파로 산 주의 거래량이 평소 2배 미만이면 다음 주 시가에 매도", run(v2))
     add("돌파 거래량 1.5배 확인", "같은 규칙, 기준 1.5배", run(v15))
     add("기저 26주 미만 돌파 제외", "6개월 이상 다진 기저를 돌파할 때만 매수", run(b26))
-    add("갭 3%+ 돌파 건너뜀", "월요일 시가가 매수 스톱 가격보다 3% 넘게 위에서 시작하면 사지 않음", run(g3))
+    add("갭 2%+ 돌파 건너뜀", "앱 요령대로 스톱 지정가를 매수가 +2%로: 시가가 그보다 위에서 시작하면 사지 않음", run(g2))
     add("약한 셋업 제외", "30주선 이탈했던 풀백 · 52주 +60% 후반 · 헤드앤숄더 천장 뒤 · 실적 2주 앞 풀백 제외", run(weak_out(sig0)))
-    add("필터 모두", "거래량 1.5배 확인 + 기저 26주 + 갭 3% + 약한 셋업 제외", run(allf))
+    add("필터 모두", "거래량 1.5배 확인 + 기저 26주 + 갭 2% + 약한 셋업 제외", run(allf))
     add("필터 모두 + 80점", "위 + 80점 이상만", run(allf, ms=80))
     add("필터 모두 + 위험 1.5%", "위 + 1회 손절 시 계좌 1.5%", run(allf, risk=1.5))
     add("필터 모두 + 8종목", "위 + 동시 최대 8종목 (한 종목 최대 12.5%)", run(allf, mp_=8))
     if q_eq is not None:
         add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))
-        add("반반: 지금 ★ + QQQ", "자금 50%는 지금 전략, 50%는 QQQ(4단계면 현금)", (blend(eqs["지금 ★"], q_eq), None))
+        add("반반: 지금 + QQQ", "자금 50%는 지금 전략, 50%는 QQQ(4단계면 현금)", (blend(eqs["지금"], q_eq), None))
         add("반반: 필터 모두 + QQQ", "자금 50%는 필터 모두, 50%는 QQQ(4단계면 현금)", (blend(eqs["필터 모두"], q_eq), None))
-    keep = ["지금 ★", "필터 모두", "반반: 필터 모두 + QQQ", "QQQ · 4단계 때만 현금"]
+    keep = ["지금", "필터 모두", "반반: 필터 모두 + QQQ", "QQQ · 4단계 때만 현금"]
     curves = {k: eqs[k] / eqs[k].iloc[0] * 100 for k in keep if k in eqs}
     if "QQQ" in dfs:
         c = dfs["QQQ"]["Close"].reindex(cal, method="ffill")
@@ -1082,7 +1083,9 @@ def main(argv=None, fetch=None, universe=None):
         cl3 = ss[~ss["dup"]]
         seg.append(dict(name=cp, n_t=int(ss["ticker"].nunique()), c=stats_curve(e3["equity"]), t=stats_trades(t3), s=stats_trades(cl3)))
         print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
-    improve, imp_curves = improve_study(frames, cal, dfs, args, runs[best], CV, dict(SK[sk_b], **base_kw), mp_b, fill_b, ms_b, capmap, near_earn)
+    ib = IMPROVE_BASE if IMPROVE_BASE in runs else best
+    *_, mp_i, fill_i, ms_i, sk_i = combos[ib]
+    improve, imp_curves = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn)
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -1207,7 +1210,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
