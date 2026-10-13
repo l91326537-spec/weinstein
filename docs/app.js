@@ -334,7 +334,7 @@ async function viewStock(v, t) {
     ${td.small ? `<div class="warn">소형주: 백테스트에서 성적이 나빴던 그룹이에요. 돌파는 그 주 거래량이 평균 2배 이상일 때만${td.brkVr ? ` (지금 ${fmt(td.brkVr, 1)}배)` : ""}, 손절은 주간 평균 변동폭(${fmt(td.atr)})×2로 넓히고 수량을 줄였어요.</div>` : ""}
     <p class="note">주문 요령 (백테스트 근거): 돌파 매수는 <b>스톱 지정가</b>로 · 지정가는 돌파 매수가 +2%${td.bkBuy ? ` (${fmt(td.bkBuy * 1.02)})` : ""}까지만 → 갭으로 그 위에서 시작하면 체결 안 됨 (갭 위 매수 0.96R vs 보통 1.93R). 손절은 금요일 종가가 손절가 아래면 매도 + 손절가 -3%${td.bkStop ? ` (${fmt(td.bkStop * 0.97)})` : ""}에 비상 자동 매도.</p>
     <p class="note">추천 수량: ${isKRW(t) ? "" : "환율 " + fmt(fxRate(), 0) + "원 기준, "}손절 시 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원의 ${s.riskPct}%만 잃는 수량${capped ? " · 손절폭이 좁아 계좌의 25%로 줄였어요" : ""}</p>
-    ${td.mvN != null ? `<p class="note">미너비니 트렌드 템플릿 <b style="color:${td.mvOk ? "var(--s2)" : "var(--muted)"}">${td.mvOk ? "충족" : "미충족"} (${td.mvN}/6)</b> · 30·40주선 위, 30주선 > 40주선, 40주선 상승, 52주 저점 +30% 이상, 52주 고점 -25% 이내. 참고용이에요 (백테스트: 충족 종목만 사면 연 15.3% → 17.5%, 우연일 수 있음).</p>` : ""}
+    ${td.mvN != null ? `<p class="note">미너비니 트렌드 템플릿 <b style="color:${td.mvOk ? "var(--s2)" : "var(--muted)"}">${td.mvOk ? "충족" : "미충족"} (${td.mvN}/6)</b> · 30·40주선 위, 30주선 > 40주선, 40주선 상승, 52주 저점 +30% 이상, 52주 고점 -25% 이내. 참고용이에요 (백테스트: 충족 종목만 샀을 때 한 번은 연 +2%p, 다시 돌리면 차이 없음).</p>` : ""}
     ${viol.length ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}</div>` : `<div class="ok">와인스테인 기본 조건 통과</div>`}
     <div class="btns">${held ? `<a class="btn" href="#hold">보유 중 · 손절 관리 보기</a>` : `<button class="btn primary" id="buyBtn">매수 기록</button>`}</div>
   </section>
