@@ -207,6 +207,7 @@ async function viewHome(v) {
   const top = SUM.candidates.filter(c => c.signal && c.cap !== "소형").sort((a, b) => b.score - a.score).slice(0, 5);
   const secs = SUM.sectors;
   v.innerHTML = `
+  <a class="card item" href="#orders" style="text-decoration:none"><span class="pill st2">주문</span><span style="min-width:0"><b>이번 주 주문</b><div class="n">매수·매도·손절 주문을 한 화면에 · 보내기/복사</div></span><span class="r">›</span></a>
   <section class="card"><h3>시장</h3>${mrow}
     ${worst === 4 ? `<div class="warn">시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>` : worst === 3 ? `<div class="warn">시장 3단계: 매수 규모 축소, 손절 좁히기</div>` : ""}
   </section>
@@ -595,6 +596,89 @@ function viewSettings(v) {
   $("#imp", v).onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!Array.isArray(d.holdings) || !Array.isArray(d.trades)) throw 0; store.replace(d); toast(`불러왔어요 · 보유 ${d.holdings.length} · 거래 ${d.trades.length}`); } catch (_) { toast("백업 파일 형식이 아니에요"); } };
 }
 
+/* ---------- 화면: 이번 주 주문 ---------- */
+/* 백테스트 규칙 그대로: 매수는 신호 + 80점 이상(소형주 제외) · 빈자리만큼 점수 순 · 손절 시 계좌 riskPct% · 한 종목 최대 100/최대종목수%(25% 이하)
+   매도는 4단계 진입 또는 금요일 종가가 손절가 아래 → 월요일 매도, 나머지는 손절 주문 유지 */
+function orderQty(t, entry, stop, s) {
+  const acct = isKRW(t) ? s.account : s.account / fxRate(), risk = entry - stop;
+  if (!(risk > 0) || !(entry > 0)) return null;
+  const capPct = Math.min(25, 100 / (s.maxPos || 6));
+  return Math.max(0, Math.min(Math.floor(acct * s.riskPct / 100 / risk), Math.floor(acct * capPct / 100 / entry)));
+}
+async function weekOrders() {
+  const d = store.get(), s = d.settings, H = d.holdings, sells = [], keeps = [];
+  for (const h of H) {
+    try {
+      const td = await loadT(h.t), st = holdStatus(td, h);
+      if (td.stage === 4) sells.push({ h, why: "4단계 진입", close: st.close });
+      else if (st.close < st.stop) sells.push({ h, why: `금요일 종가 ${fmt(st.close)} < 손절 ${fmt(st.stop)}`, close: st.close });
+      else keeps.push({ h, stop: st.stop, close: st.close });
+    } catch (e) { keeps.push({ h, stop: +h.initStop, close: null, nodata: true }); }
+  }
+  const held = new Set(H.map(h => h.t));
+  const slots = Math.max(0, (s.maxPos || 6) - (H.length - sells.length));
+  const pool = SUM.worst === 4 ? [] : SUM.candidates.filter(c => c.signal && c.score >= BUY_SCORE && c.cap !== "소형" && !held.has(c.t)).sort((a, b) => b.score - a.score);
+  const buys = [];
+  for (const c of pool) {
+    if (buys.length >= slots) break;
+    let o = null;
+    if (c.signal === "돌파" && c.bkBuy && c.bkStatus === "돌파 대기") {
+      o = { kind: "스톱 지정가", stopPx: c.bkBuy, limit: Math.min(c.bkBuy * 1.02, c.bkMax || 1e12), entry: c.bkBuy, sl: c.bkStop, note: "가격이 스톱가에 닿으면 지정가로 매수 · 시가가 지정가 위면 체결 안 됨(갭 추격 금지)" };
+    } else if (c.signal === "돌파" && c.bkBuy && c.bkStatus === "돌파함 · 매수 가능") {
+      o = { kind: "지정가", limit: c.bkMax, entry: Math.min(c.close, c.bkMax), sl: c.bkStop, note: `이미 돌파함 · 월요일 ${fmt(c.bkMax)} 이하에서만 매수 (추격 한도)` };
+    } else if (c.signal === "풀백" && c.pbNow && c.pbStop) {
+      o = { kind: "지정가", limit: c.pbZone ? c.pbZone[1] : c.close, entry: c.close, sl: c.pbStop, note: `30주선 풀백 · 월요일 시가 근처 매수, ${fmt(c.pbZone ? c.pbZone[1] : c.close)} 위로 뛰면 보류` };
+    }
+    if (!o || !(o.entry > o.sl)) continue;
+    o.qty = orderQty(c.t, o.entry, o.sl, s);
+    if (!o.qty) continue;
+    buys.push({ c, ...o, emerg: o.sl * 0.97, amt: Math.round(toKRW(o.qty * o.entry, c.t)) });
+  }
+  return { sells, keeps, buys, slots, more: pool.length - buys.length, s };
+}
+function ordersText(O) {
+  const L = [`[와인스테인 이번 주 주문] ${SUM.updated ? new Date(SUM.updated).toLocaleDateString("ko-KR") : ""} 데이터`];
+  if (O.sells.length) { L.push("", "■ 매도 (월요일 장 시작)"); O.sells.forEach(x => L.push(`- ${x.h.t} ${x.h.shares}주 매도 · ${x.why}`)); }
+  if (O.buys.length) {
+    L.push("", "■ 매수");
+    O.buys.forEach(b => L.push(`- ${b.c.t} (${b.c.kind || b.c.signal} · ${b.c.score}점) ${b.stopPx ? `스톱 ${fmt(b.stopPx)} · 지정가` : "지정가"} ${fmt(b.limit)} · ${b.qty}주`,
+      `  손절: 금요일 종가 ${fmt(b.sl)} 아래면 매도 · 비상 자동 매도 ${fmt(b.emerg)}`));
+  }
+  if (O.keeps.length) { L.push("", "■ 보유 유지 (손절 주문 확인)"); O.keeps.forEach(k => L.push(`- ${k.h.t}: 금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 ${fmt(k.stop * 0.97)}`)); }
+  if (!O.sells.length && !O.buys.length) L.push("", "이번 주 새 주문 없음");
+  return L.join("\n");
+}
+async function viewOrders(v) {
+  v.innerHTML = `<h1>이번 주 주문</h1><div class="muted">계산 중…</div>`;
+  const O = await weekOrders();
+  if (!document.body.contains(v)) return;
+  const s = O.s;
+  v.innerHTML = `<h1>이번 주 주문</h1>
+  ${SUM.weekComplete ? "" : `<div class="warn">이번 주봉이 아직 확정되지 않았어요(주중 데이터). 주문은 금요일 미국장 마감 뒤, 토요일에 확정해서 넣으세요.</div>`}
+  ${SUM.worst === 4 ? `<div class="warn">시장 4단계: 신규 매수 없음 (매도·손절만)</div>` : ""}
+  <section class="card"><h3>매도 ${O.sells.length}건</h3>
+    ${O.sells.length ? `<div class="list">${O.sells.map(x => `<a class="item" href="#stock/${encodeURIComponent(x.h.t)}"><span class="pill st4">매도</span><span style="min-width:0"><b class="mono">${esc(x.h.t)}</b> ${x.h.shares}주<div class="n">${esc(x.why)} · 월요일 장 시작에 매도</div></span><span class="r"><b>${fmt(x.close)}</b></span></a>`).join("")}</div>` : `<p class="note">팔 종목이 없어요.</p>`}
+  </section>
+  <section class="card"><h3>매수 ${O.buys.length}건 <span class="muted" style="font-size:12px;font-weight:400">빈자리 ${O.slots} · ${BUY_SCORE}점+ 신호 · 소형주 제외</span></h3>
+    ${O.buys.length ? `<div class="list">${O.buys.map(b => `<a class="item" href="#stock/${encodeURIComponent(b.c.t)}">${ring(b.c.score, 42)}
+      <span style="min-width:0"><b class="mono">${esc(b.c.t)}</b> <span class="pill st2">${esc(b.c.kind || b.c.signal)}</span>${b.c.mvOk ? ` <span class="pill st2">미너비니</span>` : ""}
+        <div class="n">${b.stopPx ? `스톱 지정가 · 스톱 <b>${fmt(b.stopPx)}</b> · 지정가` : "지정가"} <b>${fmt(b.limit)}</b> · <b>${b.qty}주</b> (약 ${(b.amt / 10000).toFixed(0)}만원)</div>
+        <div class="n">손절: 금요일 종가 <b style="color:var(--s4)">${fmt(b.sl)}</b> 아래면 매도 · 비상 자동 매도 <b style="color:var(--s4)">${fmt(b.emerg)}</b></div>
+        <div class="n muted">${esc(b.note)}</div></span><span></span></a>`).join("")}</div>`
+      : `<p class="note">${O.slots ? "조건에 맞는 매수 신호가 없어요." : `빈자리가 없어요 (최대 ${s.maxPos}종목).`}</p>`}
+    ${O.more > 0 && O.buys.length ? `<p class="note">자리가 없어 빠진 ${BUY_SCORE}점+ 신호 ${O.more}개는 '후보 → 매수 ${BUY_SCORE}+'에서 볼 수 있어요.</p>` : ""}
+  </section>
+  ${O.keeps.length ? `<section class="card"><h3>보유 유지 ${O.keeps.length}종목</h3><p class="note">증권사에 걸어 둔 손절 주문이 맞는지 확인하세요.</p>
+    <div class="list">${O.keeps.map(k => `<a class="item" href="#stock/${encodeURIComponent(k.h.t)}"><span class="pill st2">유지</span><span style="min-width:0"><b class="mono">${esc(k.h.t)}</b> ${k.h.shares}주<div class="n">금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 자동 매도 ${fmt(k.stop * 0.97)}</div></span><span class="r"><b>${fmt(k.close)}</b></span></a>`).join("")}</div></section>` : ""}
+  <section class="card"><div class="btns"><button class="btn primary" id="oshare">주문 목록 보내기·복사</button></div>
+    <p class="note">수량은 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원 · 손절 시 ${s.riskPct}% 손실 · 한 종목 최대 ${Math.min(25, 100 / (s.maxPos || 6)).toFixed(0)}% 기준이에요(설정에서 바꿀 수 있어요). 자동 계산 결과라 주문 전에 차트를 한 번 더 확인하세요. 투자 조언이 아니며 수익을 보장하지 않습니다.</p></section>`;
+  $("#oshare", v).onclick = async () => {
+    const text = ordersText(O);
+    try { if (navigator.share) { await navigator.share({ title: "이번 주 주문", text }); return; } } catch (e) { if (e && e.name === "AbortError") return; }
+    try { await navigator.clipboard.writeText(text); toast("주문 목록을 복사했어요"); } catch (e) { toast("복사하지 못했어요"); }
+  };
+}
+
 /* ---------- 라우터 ---------- */
 async function route() {
   const v = $("#view");
@@ -605,6 +689,7 @@ async function route() {
   window.onresize = null;
   try {
     if (tab === "cands") viewCands(v);
+    else if (tab === "orders") await viewOrders(v);
     else if (tab === "stock") await viewStock(v, arg ? decodeURIComponent(arg).toUpperCase() : "");
     else if (tab === "hold") await viewHold(v);
     else if (tab === "journal") await viewJournal(v);
