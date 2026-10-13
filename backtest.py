@@ -200,7 +200,7 @@ def collect_signals(frames, start, min_score_floor=50, ver=1):
 
 
 # ---------------- 거래량·매수 시점 비교용 ----------------
-def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False, emerg=None, ma_exit=None):
+def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False, emerg=None, ma_exit=None, chand=None):
     """mode: 'intra'=장중 손절가 닿으면 매도(자동 매도) | 'close'=금요일 종가가 손절가 아래면 그 종가에 매도
        dyn_ma: 손절가 대신 '금요일 종가가 30주선 아래면 매도' (s0는 수량 계산용 명목 손절)"""
     ma_v = f["ma30"].values
@@ -216,6 +216,8 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
             return (f.index[j], f.index[j + 1], e, px, (px - e) / risk, 1, "돌파 거래량 부족", s0)
         j += 1
     s_orig, moved = s0, False
+    atr_v = f["atr10"].values if chand else None
+    hh = e
     while j < len(f):
         if be and not moved and j - j0 >= be:
             moved = True
@@ -235,6 +237,10 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
         elif lo[j] <= s0:
             px = min(s0, o[j])
             return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절" if s0 == s_orig else "본전 손절", s_orig)
+        if chand:                               # 샹들리에: 매수 후 최고 종가 - ATR×chand 아래로 금요일 마감하면 매도
+            hh = max(hh, c[j])
+            if not math.isnan(atr_v[j]) and c[j] < hh - chand * atr_v[j]:
+                return (f.index[j0], f.index[j], e, c[j], (c[j] - e) / risk, j - j0, "샹들리에 청산", s_orig)
         if ma_exit is not None and not math.isnan(ma_v[j]) and c[j] < ma_v[j] * (1 - ma_exit / 100):   # 금요일 종가가 30주선 -ma_exit% 아래
             px = c[j]
             return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "30주선 종가 이탈", s_orig)
@@ -445,7 +451,7 @@ def e_pos(r):
 
 def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2",
                     rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None,
-                    vol_need=None, min_base=0, max_gap=None, ma_exit=None):
+                    vol_need=None, min_base=0, max_gap=None, ma_exit=None, chand=None):
     """vol_need: 돌파 매수한 주 거래량이 이 배수 미만이면 다음 주 시가 매도 · min_base: 기저가 이 주 수 미만인 돌파는 안 삼
        max_gap: 시가가 매수 스톱 가격보다 이 % 넘게 위에서 시작하면 그 돌파는 건너뜀"""
     """mh: 잔고점 돌파 dict(stop='pct'|'low3', bonus=점수 가점, k=최근 몇 주 고점)
@@ -536,7 +542,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(s0, e, i)
                 if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose", emerg, ma_exit)
+                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose", emerg, ma_exit, chand)
             elif g == "돌파" and entry_rule == "monday":
                 if vol_rule == "strict" and not (bvr[i] >= 2.0):
                     continue
@@ -599,7 +605,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(e * (1 - pct / 100), e, i)
                 if (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else vol_need, be, stop_mode, False, emerg, ma_exit)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else vol_need, be, stop_mode, False, emerg, ma_exit, chand)
                 gapk = "up" if o[j] >= trig else ("down" if o[j] <= c[i] * 0.98 else "normal")
                 last_entry = j
                 ent, ex, e, px, R, wk, why, s0 = tr
@@ -928,6 +934,60 @@ IMPROVE_SPLIT = pd.Timestamp("2016-01-01")   # 앞·뒤 기간을 나눠 필터�
 IMPROVE_BASE = "금요일 종가 + 비상 손절 -3%"   # 앱 주문 요령과 같은 규칙. ★는 실행마다 데이터 차이로 바뀔 수 있어 기준은 고정
 
 
+TECH_COLS = ("minervini", "rs_rank", "mom_rank", "rsi14", "macd_up", "adx14", "golden", "squeeze")
+
+
+def tech_indicators(frames, cal):
+    """유명한 기술적 지표를 주봉으로 (각 주 금요일까지의 값만)"""
+    print("기술적 지표 계산 중 (미너비니·RS 순위·RSI·MACD·ADX·볼린저)...")
+    for f in frames.values():
+        if "minervini" in f:
+            continue
+        c, h, l = f["close"], f["high"], f["low"]
+        pc = c.shift(1)
+        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+        f["atr10"] = tr.rolling(10).mean()
+        ma30, ma40, ma10 = c.rolling(30).mean(), c.rolling(40).mean(), c.rolling(10).mean()
+        lo52, hi52 = l.rolling(52, min_periods=40).min(), h.rolling(52, min_periods=40).max()
+        f["minervini"] = ((c > ma30) & (c > ma40) & (ma30 > ma40) & (ma40 > ma40.shift(4))
+                          & (c >= lo52 * 1.3) & (c >= hi52 * 0.75)).astype(float)
+        d = c.diff()
+        g, ls = d.clip(lower=0).ewm(alpha=1 / 14).mean(), (-d.clip(upper=0)).ewm(alpha=1 / 14).mean()
+        f["rsi14"] = 100 - 100 / (1 + g / ls)
+        macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
+        f["macd_up"] = (macd > macd.ewm(span=9).mean()).astype(float)
+        up, dn = h.diff(), -l.diff()
+        pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=f.index)
+        mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=f.index)
+        atr14 = tr.ewm(alpha=1 / 14).mean()
+        pdi, mdi = 100 * pdm.ewm(alpha=1 / 14).mean() / atr14, 100 * mdm.ewm(alpha=1 / 14).mean() / atr14
+        f["adx14"] = (100 * (pdi - mdi).abs() / (pdi + mdi)).ewm(alpha=1 / 14).mean()
+        f["golden"] = (ma10 > ma40).astype(float)
+        bw = 4 * c.rolling(20).std() / c.rolling(20).mean()
+        f["squeeze"] = (bw.rolling(8).min() <= bw.rolling(52, min_periods=40).quantile(0.25)).astype(float)
+    # 전체 종목 대비 순위 (그 주에 데이터가 있는 종목끼리)
+    cl = pd.concat({t: f["close"] for t, f in frames.items()}, axis=1)
+    r12 = (cl / cl.shift(52) - 1).rank(axis=1, pct=True) * 100
+    m121 = (cl.shift(4) / cl.shift(52) - 1).rank(axis=1, pct=True) * 100
+    for t, f in frames.items():
+        f["rs_rank"], f["mom_rank"] = r12[t].reindex(f.index), m121[t].reindex(f.index)
+
+
+def tech_masks(tk):
+    """(이름, 설명, 통과 여부 배열)"""
+    return [
+        ("미너비니 트렌드 템플릿", "30·40주선 위 · 30주선>40주선 · 40주선 상승 · 52주 저점 +30% 이상 · 52주 고점 -25% 이내", tk["minervini"] == 1),
+        ("오닐 RS 순위 상위 20%", "12개월 수익률이 전체 종목 중 상위 20% (IBD RS 80+와 비슷)", tk["rs_rank"] >= 80),
+        ("12-1 모멘텀 상위 30%", "최근 4주를 뺀 12개월 수익률이 상위 30%", tk["mom_rank"] >= 70),
+        ("RSI(14주) 50~80", "주봉 RSI가 50 이상 80 이하일 때만 (약세·과열 제외)", (tk["rsi14"] >= 50) & (tk["rsi14"] <= 80)),
+        ("MACD 시그널 위", "주봉 MACD(12·26)가 시그널(9) 위일 때만", tk["macd_up"] == 1),
+        ("ADX(14주) 25 이상", "추세 강도 ADX가 25 이상일 때만", tk["adx14"] >= 25),
+        ("골든크로스", "10주선이 40주선 위 (일봉 50·200일선과 비슷)", tk["golden"] == 1),
+        ("볼린저 수축 뒤", "최근 8주 안에 볼린저 밴드 폭이 52주 하위 25%까지 좁아졌던 종목 (VCP와 비슷)", tk["squeeze"] == 1),
+        ("미너비니 + RS 상위 20%", "트렌드 템플릿과 RS 순위 상위 20%를 모두 충족", (tk["minervini"] == 1) & (tk["rs_rank"] >= 80)),
+    ]
+
+
 def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn):
     """지금 최적 규칙(best_run)에서 하나씩 바꿔 본 포트폴리오 결과. 반환: (표 행 목록, 곡선 dict)"""
     sig0, eq0, tr0 = best_run
@@ -993,6 +1053,7 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
                     break
         return pd.concat([df, pd.DataFrame(out)], ignore_index=True) if out else df
 
+    tech_indicators(frames, cal)
     print("수익률 개선 후보 돌리는 중...")
     sig0 = sig0.copy()
     sig0["beta"] = tag(sig0, "beta")
@@ -1043,6 +1104,11 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     add("10주선 추매", "+5% 수익 중 10주선에 닿으면 위험 절반만큼 추매 (손절 10주선 -5%)", run(add_ons(sig0)))
     add("8주 뒤 본전 손절", "매수 8주 뒤 종가가 수익이면 손절가를 매수가로", run(CV(be=8, **kw)))
     add("30주선 종가 -3% 이탈 매도", "4단계를 기다리지 않고, 금요일 종가가 30주선 -3% 아래면 그 종가에 매도", run(CV(ma_exit=3, **kw)))
+    # 유명한 기술적 기법 결합 (신호 주 금요일까지의 값으로 거르기)
+    tk = {c: tag(sig0, c) for c in TECH_COLS}
+    for lab, desc, m in tech_masks(tk):
+        add("[결합] " + lab, desc, run(sig0[m]))
+    add("[결합] 샹들리에 청산", "4단계를 기다리지 않고, 매수 후 최고 종가 - ATR(10주)×3 아래로 금요일 마감하면 매도", run(CV(chand=3, **kw)))
     add("시장 3단계면 신규 매수 보류", "나스닥·S&P 중 나쁜 쪽이 3단계인 주의 신호는 안 삼 (지금은 4단계만 보류)", run(sig0[sig0["mkt_s"] != 3]))
     if q_eq is not None:
         add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))
@@ -1056,6 +1122,10 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     sc_ = sig0[sig0["score"] >= 65]
     beta_rows = [(f"[베타] 65점+ 신호 · 베타 {lab}", stats_trades(sc_[(sc_["beta"] >= lo) & (sc_["beta"] < hi)]))
                  for lab, lo, hi in (("0.8 미만", -9, 0.8), ("0.8~1.2", 0.8, 1.2), ("1.2~1.6", 1.2, 1.6), ("1.6 이상", 1.6, 99))]
+    sc_t = {c: tag(sc_, c) for c in TECH_COLS}
+    for lab, _, m in tech_masks(sc_t):
+        beta_rows.append((f"[결합] 65점+ 신호 · {lab} 충족", stats_trades(sc_[m])))
+        beta_rows.append((f"[결합] 65점+ 신호 · {lab} 미충족", stats_trades(sc_[~m])))
     return rows, curves, beta_rows
 
 
