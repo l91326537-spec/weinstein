@@ -97,7 +97,7 @@ def build_frames(dfs, uni):
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
             qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
-            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(q.get("sqz", 0))
+            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(1 if q.get("sqz_on") else 0)
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
@@ -107,8 +107,8 @@ def build_frames(dfs, uni):
         dd = np.nan_to_num(ddv, nan=0.0)
         ov = np.where(dd <= -25, -10, np.where(dd <= -15, -5, 0))
         ovp = np.where(np.array(isb), 0, ov)
-        f["sqz_pts"] = np.array(qS, float)
-        cur = base + T + Pt + f["sqz_pts"].values      # 볼린저 수축 가점 (앱 점수와 같게)
+        f["sqz_on"] = np.array(qS, float)              # 볼린저 수축 뒤 돌파·풀백 (가점 크기와 무관)
+        cur = base + T + Pt + f["sqz_on"].values * S.CFG["squeeze_pts"]      # 볼린저 수축 가점 (앱 점수와 같게)
         C, D = np.array(qC, float), np.array(qD, float)
         for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D)):
             v = np.clip(s2 + a, 0, 100)
@@ -1105,11 +1105,11 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
         add("[결합] " + lab, desc, run(sig0[m]))
     add("[결합] 샹들리에 청산", "4단계를 기다리지 않고, 매수 후 최고 종가 - ATR(10주)×3 아래로 금요일 마감하면 매도", run(CV(chand=3, **kw)))
     # 볼린저 수축 가점 크기 (지금 = screener CFG 값)
-    sq = tag(sig0, "sqz_pts")
-    for alt in (0, 3, 8):
+    sq = tag(sig0, "sqz_on")
+    for alt in (0, 3, 5, 8):
         if alt != S.CFG["squeeze_pts"]:
-            add("볼린저 가점 없음" if alt == 0 else f"볼린저 가점 +{alt}", f"볼린저 수축 뒤 신호 가점을 {S.CFG['squeeze_pts']}점 대신 {alt}점으로",
-                run(sig0.assign(score=np.clip(sig0["score"] - sq + np.where(sq > 0, alt, 0), 0, 100))))
+            add("볼린저 가점 없음" if alt == 0 else f"볼린저 가점 +{alt}", f"볼린저 수축 뒤 신호 가점을 {S.CFG['squeeze_pts']}점 대신 {alt}점으로 (점수만 다시 매긴 근사치)",
+                run(sig0.assign(score=np.clip(sig0["score"] + (sq == 1) * (alt - S.CFG["squeeze_pts"]), 0, 100))))
     add("시장 3단계면 신규 매수 보류", "나스닥·S&P 중 나쁜 쪽이 3단계인 주의 신호는 안 삼 (지금은 4단계만 보류)", run(sig0[sig0["mkt_s"] != 3]))
     if q_eq is not None:
         add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))

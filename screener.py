@@ -452,9 +452,11 @@ def quality_adj(s, signal=None):
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
-    if CFG["squeeze_pts"] and signal in ("돌파", "풀백") and s.get("stage") in (1, 2) and s.get("squeeze"):
-        out["sqz"] = CFG["squeeze_pts"]
-        out["notes"].append(f"볼린저 수축 뒤 신호 +{CFG['squeeze_pts']}")
+    if signal in ("돌파", "풀백") and s.get("stage") in (1, 2) and s.get("squeeze"):
+        out["sqz_on"] = True                      # 가점이 0이어도 백테스트가 다른 가점 크기를 비교할 수 있게 표시
+        if CFG["squeeze_pts"]:
+            out["sqz"] = CFG["squeeze_pts"]
+            out["notes"].append(f"볼린저 수축 뒤 신호 +{CFG['squeeze_pts']}")
     if s.get("stage") != 2:
         return out
     if late_stage(s):
