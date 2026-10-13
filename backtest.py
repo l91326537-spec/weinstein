@@ -809,7 +809,7 @@ def line_svg(series, w=1000, h=320):
 
 
 def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None,
-                 improve=None, imp_curves=None, imp_base=None, qqq_entry=None):
+                 improve=None, imp_curves=None, imp_base=None, qqq_entry=None, lev=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -859,6 +859,24 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
                      f"<td>{sgn(r['rel260'])}</td><td>{f_(r['win260'], 0, True)}</td><td>{sgn(r['worst260'])}</td>"
                      f"<td>{f_(r['wait'], 0)}</td><td>{f_(r['miss5'], 0, True)}</td></tr>")
         P.append("</table></div>")
+    if lev and lev[0]:
+        P.append("<h2>레버리지 ETF · 섞기 · 코어-위성</h2><div class=mut style='margin-bottom:6px'>QLD·TQQQ는 2008년을 포함하려고 QQQ 일봉으로 재현했어요"
+                 "(하루 수익률 ×2·×3 - 보수 0.95% - 차입 비용, 매일 리밸런싱). 아래 작은 표에서 실제 상품과 재현값을 비교할 수 있어요. 섞기·코어-위성은 4주마다 비중을 다시 맞추고 그 비용은 뺐어요. "
+                 "'헬스케어'는 종목 목록에 세부 업종이 없어 GICS 헬스케어 전체(바이오·제약·의료기기·서비스)로 근사했어요.</div>"
+                 f"<div class=tw><table><tr><th class=l>방식</th><th>연평균</th><th>최대 낙폭</th><th>연평균/최대낙폭</th><th>2008년</th><th>2022년</th><th>최악의 해</th>"
+                 f"<th>~{IMPROVE_SPLIT.year - 1} 연평균</th><th>{IMPROVE_SPLIT.year}~ 연평균</th></tr>")
+        for r in lev[0]:
+            c_ = r["c"]
+            dsc = f"<div class=mut style='font-size:12px;white-space:normal;min-width:200px'>{e(r['desc'])}</div>" if r["desc"] else ""
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b>{dsc}</td>"
+                     f"<td>{sgn(c_.get('cagr'))}</td><td>{sgn(c_.get('mdd'))}</td><td>{f_(c_.get('mar'), 2)}</td><td>{sgn(r['y08'])}</td><td>{sgn(r['y22'])}</td><td>{sgn(r['worst'])}</td>"
+                     f"<td>{sgn(r['a'].get('cagr'))}</td><td>{sgn(r['b'].get('cagr'))}</td></tr>")
+        P.append("</table></div>")
+        if lev[1]:
+            P.append(f"<div class=tw style='margin-top:8px'><table><tr><th class=l>실제 vs 재현 ({e(lev[1][0]['since'])}~)</th><th>실제 연평균</th><th>재현 연평균</th><th>실제 최대 낙폭</th><th>재현 최대 낙폭</th></tr>")
+            for r in lev[1]:
+                P.append(f"<tr><td class=l>{e(r['name'])}</td><td>{sgn(r['act'].get('cagr'))}</td><td>{sgn(r['sim'].get('cagr'))}</td><td>{sgn(r['act'].get('mdd'))}</td><td>{sgn(r['sim'].get('mdd'))}</td></tr>")
+            P.append("</table></div>")
     if improve:
         P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(imp_base or best or '')}</b> 규칙(앱 주문 요령 · 6종목 · QQQ 채우기)에 하나씩 바꿔 본 결과. "
                  f"필터는 이 20년 데이터의 신호 표를 보고 고른 것이라, 앞 기간(~{IMPROVE_SPLIT.year - 1})과 뒤 기간({IMPROVE_SPLIT.year}~) 모두에서 '지금'보다 나아야 믿을 만해요. "
@@ -994,7 +1012,7 @@ def tech_masks(tk):
     ]
 
 
-def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn):
+def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn, secmap=None):
     """지금 최적 규칙(best_run)에서 하나씩 바꿔 본 포트폴리오 결과. 반환: (표 행 목록, 곡선 dict)"""
     sig0, eq0, tr0 = best_run
     ms0 = args.min_score
@@ -1131,6 +1149,19 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     if "QQQ" in dfs:
         c = dfs["QQQ"]["Close"].reindex(cal, method="ffill")
         curves["QQQ"] = c / c.iloc[0] * 100
+    # 코어-위성: 위성 후보 (지금 규칙 전체 / 헬스케어만 / 헬스케어 소형 포함 / 바이오 ETF 2단계만)
+    secmap = secmap or {}
+    sats = {"지금 전략": eq0["equity"]}
+    hc = sig0[sig0["ticker"].map(secmap) == "Health Care"]
+    if len(hc):
+        sats["헬스케어 대·중형"] = run(hc)[0]["equity"]
+        hs = CV(**dict(kw, small={}))
+        hs = hs[hs["ticker"].map(secmap) == "Health Care"]
+        if len(hs):
+            sats["헬스케어 소형 포함"] = run_portfolio(hs, frames, cal, ms0, max_pos=mp, fill=fill, caps=capmap)[0]["equity"]
+    if "XBI" in dfs:
+        sats["바이오 ETF(XBI) 2단계만"] = etf_timing(dfs, ["XBI"], cal, 1, (2,), (1, 3, 4), bench=dfs["^GSPC"]["Close"])[0]
+    lev = lev_study(dfs, cal, args.start, sats)
     sc_ = sig0[sig0["score"] >= 65]
     beta_rows = [(f"[베타] 65점+ 신호 · 베타 {lab}", stats_trades(sc_[(sc_["beta"] >= lo) & (sc_["beta"] < hi)]))
                  for lab, lo, hi in (("0.8 미만", -9, 0.8), ("0.8~1.2", 0.8, 1.2), ("1.2~1.6", 1.2, 1.6), ("1.6 이상", 1.6, 99))]
@@ -1138,7 +1169,117 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     for lab, _, m in tech_masks(sc_t):
         beta_rows.append((f"[결합] 65점+ 신호 · {lab} 충족", stats_trades(sc_[m])))
         beta_rows.append((f"[결합] 65점+ 신호 · {lab} 미충족", stats_trades(sc_[~m])))
-    return rows, curves, beta_rows
+    return rows, curves, beta_rows, lev
+
+
+# ---------------- 레버리지 ETF · 섞기 · 코어-위성 ----------------
+def daily_close(tickers, start):
+    """야후 일봉 종가 (레버리지 재현용). 실패하면 빈 dict"""
+    try:
+        import yfinance as yf
+        d = yf.download(list(tickers), start=start, interval="1d", auto_adjust=True, progress=False, group_by="ticker", threads=True)
+        out = {}
+        for t in tickers:
+            try:
+                out[t] = d[t]["Close"].dropna()
+            except Exception:
+                pass
+        return out
+    except Exception as ex:
+        print("  일봉을 받지 못했어요:", ex)
+        return {}
+
+
+def weekly_of(daily, cal):
+    """일봉 → 주봉 달력(cal: 그 주 첫날 표시)의 그 주 마지막 종가"""
+    idx = pd.DatetimeIndex(cal) + pd.Timedelta(days=6)
+    return pd.Series(daily.reindex(idx, method="ffill").values, index=cal)
+
+
+def sim_lev(qd, irx, L, fee=0.95):
+    """QQQ 일별 수익률 × L - 보수 - (L-1)×단기금리 로 레버리지 ETF 재현 (매일 리밸런싱)"""
+    r = qd.pct_change()
+    rf = (irx.reindex(r.index).ffill().fillna(0) / 100 / 252) if irx is not None else 0.0
+    rl = L * r - fee / 100 / 252 - (L - 1) * rf
+    return (1 + rl.fillna(0)).cumprod()
+
+
+def mix(series, ws, every=4):
+    """여러 곡선을 ws 비중으로 섞고 every주마다 비중을 다시 맞춤"""
+    R = pd.concat([x.pct_change() for x in series], axis=1).fillna(0).values
+    w = np.array(ws, float)
+    v, tot = w.copy(), [1.0]
+    for k in range(1, len(R)):
+        v = v * (1 + R[k])
+        if k % every == 0:
+            v = v.sum() * w
+        tot.append(v.sum())
+    return pd.Series(tot, index=series[0].index) * 100
+
+
+def timed(sw, stage):
+    """지난주 QQQ 단계가 4면 그 주는 현금 (수수료 무시)"""
+    r = sw.pct_change().fillna(0).values
+    st = stage.shift(1).values
+    r = np.where(st == 4, 0.0, r)
+    return pd.Series(np.cumprod(1 + r), index=sw.index) * 100
+
+
+def curve_row(name, desc, s):
+    s = s.dropna()
+    yr = s.resample("YE").last().pct_change() * 100
+    return dict(name=name, desc=desc, c=stats_curve(s), a=stats_curve(s[s.index < IMPROVE_SPLIT]), b=stats_curve(s[s.index >= IMPROVE_SPLIT]),
+                y08=yr.get(pd.Timestamp("2008-12-31"), np.nan), y22=yr.get(pd.Timestamp("2022-12-31"), np.nan), worst=yr.iloc[1:].min() if len(yr) > 1 else np.nan)
+
+
+def lev_study(dfs, cal, start, sats):
+    """QQQ·QLD·TQQQ 보유, 4단계면 현금, 섞기, 코어-위성. sats: {이름: 위성 곡선}"""
+    if "QQQ" not in dfs:
+        return [], []
+    print("레버리지 ETF·코어-위성 비교 중 (QQQ 일봉으로 QLD·TQQQ 재현)...")
+    dd = daily_close(["QQQ", "^IRX"], (pd.Timestamp(start) - pd.Timedelta(days=10)).date().isoformat())
+    qw = dfs["QQQ"]["Close"].reindex(cal, method="ffill")
+    if "QQQ" in dd:
+        q1 = weekly_of(dd["QQQ"], cal)
+        lv = {L: weekly_of(sim_lev(dd["QQQ"], dd.get("^IRX"), L), cal) for L in (2, 3)}
+        how = "일봉 재현"
+    else:                                                    # 일봉이 없으면 주봉으로 근사 (변동성 손실을 덜 반영 → 실제보다 좋게 나옴)
+        q1 = qw
+        r = qw.pct_change().fillna(0)
+        lv = {L: (1 + L * r - 0.0095 / 52).cumprod() for L in (2, 3)}
+        how = "주봉 근사(일봉 실패)"
+    fq = S.indicators(dfs["QQQ"])
+    qst = fq.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).reindex(cal, method="ffill")
+    QQQ, QLD, TQQQ = q1 / q1.iloc[0] * 100, lv[2] / lv[2].iloc[0] * 100, lv[3] / lv[3].iloc[0] * 100
+    rows = [
+        curve_row("QQQ 보유", "나스닥100 그냥 보유", QQQ),
+        curve_row("QLD 보유 (2배)", f"{how}: QQQ 하루 수익률 ×2 - 보수 0.95% - 차입 비용", QLD),
+        curve_row("TQQQ 보유 (3배)", f"{how}: QQQ 하루 수익률 ×3 - 보수 0.95% - 차입 비용 ×2", TQQQ),
+        curve_row("QQQ · 4단계면 현금", "지난주 QQQ가 4단계면 그 주는 현금", timed(QQQ, qst)),
+        curve_row("QLD · 4단계면 현금", "", timed(QLD, qst)),
+        curve_row("TQQQ · 4단계면 현금", "", timed(TQQQ, qst)),
+        curve_row("QQQ 50 + QLD 50", "4주마다 비중 맞춤 (전체 약 1.5배)", mix([QQQ, QLD], [0.5, 0.5])),
+        curve_row("QQQ 80 + TQQQ 20", "4주마다 비중 맞춤 (전체 약 1.4배)", mix([QQQ, TQQQ], [0.8, 0.2])),
+        curve_row("QQQ 70 + TQQQ 30", "4주마다 비중 맞춤 (전체 약 1.6배)", mix([QQQ, TQQQ], [0.7, 0.3])),
+    ]
+    core = {"QQQ": QQQ, "QLD": QLD}
+    sats = {nm: (sat.reindex(cal, method="ffill").bfill()) for nm, sat in sats.items()}
+    for nm, sat in sats.items():
+        rows.append(curve_row(f"위성만: {nm}", "위성 전략 100%", sat / sat.iloc[0] * 100))
+    for cn, cs in core.items():
+        for nm, sat in sats.items():
+            for w in (((0.8, 0.2), (0.7, 0.3)) if cn == "QQQ" else ((0.8, 0.2),)):
+                rows.append(curve_row(f"코어 {cn} {int(w[0] * 100)} + {nm} {int(w[1] * 100)}", "4주마다 비중 맞춤", mix([cs, sat], list(w))))
+    real = []
+    if "TQQQ" in dfs and "QLD" in dfs:
+        t0 = max(dfs["TQQQ"].index[0], pd.Timestamp(start))
+        win = [d for d in cal if d >= t0]
+        for nm, act, sim in (("QLD", dfs["QLD"]["Close"], QLD), ("TQQQ", dfs["TQQQ"]["Close"], TQQQ)):
+            a = act.reindex(win, method="ffill"); b = sim.reindex(win)
+            real.append(dict(name=nm, act=stats_curve(a / a.iloc[0] * 100), sim=stats_curve(b / b.iloc[0] * 100), since=str(t0.date())))
+    for r in rows:
+        print(f"  [레버리지·코어] {r['name']}: 연평균 {f_(r['c'].get('cagr'))}% · 최대낙폭 {f_(r['c'].get('mdd'))}% · 2008 {f_(r['y08'])}%")
+    return rows, real
 
 
 # ---------------- QQQ 진입 시점 (장기 보유용) ----------------
@@ -1238,7 +1379,7 @@ def main(argv=None, fetch=None, universe=None):
     uni = universe or S.load_universe(args.quick)
     uni = {k: v for k, v in uni.items() if v.get("bench") == "us"}
     years = (pd.Timestamp.today() - start).days / 365.25 + 3      # 지표 계산용 3년 더
-    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ"]
+    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ"]
     print(f"{len(need)}개 종목의 약 {years:.0f}년치 주봉을 받습니다 (처음엔 5~15분 걸릴 수 있어요)")
     dfs = (fetch or (lambda n: S.fetch_weekly(n, years=years)))(need)
     if "^GSPC" not in dfs:
@@ -1327,7 +1468,8 @@ def main(argv=None, fetch=None, universe=None):
     ib = IMPROVE_BASE if IMPROVE_BASE in runs else best
     *_, mp_i, fill_i, ms_i, sk_i = combos[ib]
     qqq_entry = qqq_entry_study(dfs, start)
-    improve, imp_curves, beta_rows = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn)
+    improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
+                                                         secmap={t: v.get("sector") for t, v in uni.items()})
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -1453,7 +1595,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib, qqq_entry=qqq_entry)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib, qqq_entry=qqq_entry, lev=lev)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
