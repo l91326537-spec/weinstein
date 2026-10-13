@@ -809,7 +809,7 @@ def line_svg(series, w=1000, h=320):
 
 
 def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None,
-                 improve=None, imp_curves=None, imp_base=None):
+                 improve=None, imp_curves=None, imp_base=None, qqq_entry=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -848,6 +848,17 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         P.append("</table></div>")
         if exit_curves:
             P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
+    if qqq_entry:
+        P.append("<h2>QQQ 진입 시점 (장기 보유용)</h2><div class=mut style='margin-bottom:6px'>2006년 이후 매주를 '살 돈이 생긴 주'로 보고, 방식별로 3년·5년 뒤 평가액을 "
+                 "'바로 한 번에'와 비교했어요. 평균 = 바로 산 경우보다 몇 % 많거나 적었나, 이긴 비율 = 바로 산 경우보다 나았던 시작 주의 비율. "
+                 "기다리는 동안 현금 이자는 0으로 계산했어요(기다리는 쪽에 조금 불리). 30주선 매수는 지난주 30주선 가격에 지정가로 산다고 봤어요.</div>"
+                 "<div class=tw><table><tr><th class=l>방식</th><th>3년 뒤 평균</th><th>3년 뒤 이긴 비율</th><th>5년 뒤 평균</th><th>5년 뒤 이긴 비율</th>"
+                 "<th>5년 뒤 최악</th><th>첫 매수까지 (중앙값, 주)</th><th>5년 안에 다 못 산 비율</th></tr>")
+        for r in qqq_entry:
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b></td><td>{sgn(r['rel156'])}</td><td>{f_(r['win156'], 0, True)}</td>"
+                     f"<td>{sgn(r['rel260'])}</td><td>{f_(r['win260'], 0, True)}</td><td>{sgn(r['worst260'])}</td>"
+                     f"<td>{f_(r['wait'], 0)}</td><td>{f_(r['miss5'], 0, True)}</td></tr>")
+        P.append("</table></div>")
     if improve:
         P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(imp_base or best or '')}</b> 규칙(앱 주문 요령 · 6종목 · QQQ 채우기)에 하나씩 바꿔 본 결과. "
                  f"필터는 이 20년 데이터의 신호 표를 보고 고른 것이라, 앞 기간(~{IMPROVE_SPLIT.year - 1})과 뒤 기간({IMPROVE_SPLIT.year}~) 모두에서 '지금'보다 나아야 믿을 만해요. "
@@ -1130,6 +1141,90 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
     return rows, curves, beta_rows
 
 
+# ---------------- QQQ 진입 시점 (장기 보유용) ----------------
+def qqq_entry_study(dfs, start, etf="QQQ"):
+    """start 이후 매주를 '돈이 생긴 주'로 보고, 진입 방식별로 3년·5년 뒤 평가액을 '바로 한 번에'와 비교.
+       각 주의 판단은 그 주까지의 데이터만 사용. 기다리는 동안 현금 이자는 0 (기다리는 쪽에 조금 불리)"""
+    if etf not in dfs:
+        return []
+    f = S.indicators(dfs[etf])
+    st = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).values
+    o, l, c, ma = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values
+    n = len(f)
+    i0 = int(f.index.searchsorted(pd.Timestamp(start)))
+
+    def buys(i, rule):
+        """돈이 생긴 주 i (금요일까지 봄) → [(매수 주, 가격, 비중)]"""
+        if i + 1 >= n:
+            return []
+        if rule == "now":
+            return [(i + 1, o[i + 1], 1.0)]
+        if rule == "dca":
+            return [(i + 1 + 4 * k, o[i + 1 + 4 * k], 1 / 6) for k in range(6) if i + 1 + 4 * k < n]
+        if rule in ("ma30", "half"):
+            got = []
+            for j in range(i + 1, n):
+                lim = ma[j - 1]                       # 지난주까지의 30주선에 지정가
+                if not np.isnan(lim) and l[j] <= lim:
+                    got = [(j, min(o[j], lim), 1.0)]
+                    break
+            if rule == "half":
+                return [(i + 1, o[i + 1], 0.5)] + [(j, p, 0.5) for j, p, _ in got]
+            return got
+        if rule == "st4":
+            for j in range(i, n - 1):
+                if st[j] == 4:
+                    return [(j + 1, o[j + 1], 1.0)]
+            return []
+        if rule == "st4end":
+            seen = False
+            for j in range(i, n - 1):
+                if st[j] == 4:
+                    seen = True
+                elif seen and st[j] in (1, 2):
+                    return [(j + 1, o[j + 1], 1.0)]
+            return []
+        return []
+
+    rules = [("바로 한 번에", "now"), ("6개월 분할 (4주마다 1/6)", "dca"), ("30주선 닿을 때까지 기다림", "ma30"),
+             ("절반 바로 + 절반 30주선 닿을 때", "half"), ("4단계가 오면 매수", "st4"), ("4단계 뒤 1·2단계로 돌아서면 매수", "st4end")]
+    cache = {r: [buys(i, r) for i in range(i0, n)] for _, r in rules}
+
+    def value(bl, h):
+        """h주 종가 기준 평가액 (처음 돈 = 1). 아직 못 산 돈은 현금"""
+        v, used = 0.0, 0.0
+        for j, p, w in bl:
+            if j <= h:
+                v += w / p * c[h]
+                used += w
+        return v + (1 - used)
+
+    rows = []
+    for lab, r in rules:
+        out = dict(name=lab)
+        for H in (156, 260):
+            rel, wins, cnt = [], 0, 0
+            for k, i in enumerate(range(i0, n)):
+                h = i + H
+                if h >= n:
+                    break
+                vr, vn = value(cache[r][k], h), value(cache["now"][k], h)
+                rel.append(vr / vn - 1)
+                wins += vr > vn * 1.0001
+                cnt += 1
+            out[f"rel{H}"] = np.mean(rel) * 100 if rel else np.nan
+            out[f"worst{H}"] = np.min(rel) * 100 if rel else np.nan
+            out[f"win{H}"] = wins / cnt * 100 if cnt else np.nan
+        waits = [bl[0][0] - (i0 + k) for k, bl in enumerate(cache[r]) if bl]
+        late = [k for k, bl in enumerate(cache[r]) if (i0 + k + 260 < n) and (not bl or bl[-1][0] > i0 + k + 260)]
+        tot5 = sum(1 for k in range(len(cache[r])) if i0 + k + 260 < n)
+        out["wait"] = float(np.median(waits)) if waits else np.nan
+        out["miss5"] = len(late) / tot5 * 100 if tot5 else np.nan
+        rows.append(out)
+        print(f"  [{etf} 진입] {lab}: 3년 뒤 {f_(out['rel156'])}% · 5년 뒤 {f_(out['rel260'])}% (바로 대비) · 이긴 비율 {f_(out['win260'], 0)}%")
+    return rows
+
+
 # ---------------- 메인 ----------------
 def main(argv=None, fetch=None, universe=None):
     ap = argparse.ArgumentParser()
@@ -1231,6 +1326,7 @@ def main(argv=None, fetch=None, universe=None):
         print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
     ib = IMPROVE_BASE if IMPROVE_BASE in runs else best
     *_, mp_i, fill_i, ms_i, sk_i = combos[ib]
+    qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn)
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
@@ -1357,7 +1453,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib, qqq_entry=qqq_entry)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
