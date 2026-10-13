@@ -127,6 +127,10 @@ function ruleCheck(td) {
   if ([3, 4].includes(td.sectorStage)) v.push("업종 " + td.sectorStage + "단계");
   if (num(td.ext) !== null && td.ext >= 20) v.push("과열(이격 20%+)");
   if (td.cap === "소형" && td.signal === "돌파" && !(td.brkVr >= 2)) v.push("소형주 돌파 거래량 2배 미만");
+  /* 백테스트는 손절폭 20% 넘는 자리는 사지 않았음 */
+  const st_ = td.signal === "풀백" ? td.pbStop : td.signal === "돌파" ? td.bkStop : null;
+  const en_ = td.signal === "돌파" && td.bkBuy && td.close < td.bkBuy ? td.bkBuy : td.close;
+  if (num(st_) !== null && en_ > 0 && (1 - st_ / en_) * 100 > 20) v.push(`손절폭 ${Math.round((1 - st_ / en_) * 100)}% (20% 초과 · 매수 부적합)`);
   return v;
 }
 
