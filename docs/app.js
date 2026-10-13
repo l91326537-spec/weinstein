@@ -117,10 +117,12 @@ function lowWhy(td) {
   if (bd.rs != null && bd.rs <= 3) out.push(`RS ${bd.rs}: 시장보다 약함`);
   return out;
 }
+/* 매수 점수 기준: 백테스트(2006~)에서 80점 이상만 산 경우가 70점보다 앞·뒤 기간 모두 나았음 */
+const BUY_SCORE = 80;
 function ruleCheck(td) {
   const v = [];
   if (SUM && SUM.worst === 4) v.push("시장 4단계");
-  if (td.score == null || td.score < 65) v.push("점수 65 미만");
+  if (td.score == null || td.score < BUY_SCORE) v.push(`점수 ${BUY_SCORE} 미만`);
   if (td.stage !== 2) v.push("2단계 아님");
   if ([3, 4].includes(td.sectorStage)) v.push("업종 " + td.sectorStage + "단계");
   if (num(td.ext) !== null && td.ext >= 20) v.push("과열(이격 20%+)");
@@ -129,8 +131,16 @@ function ruleCheck(td) {
 }
 
 /* ---------- 차트 (SVG) ---------- */
-function drawChart(box, td, weeks) {
-  const w = td.w.slice(-weeks), n = w.length;
+/* 보이는 구간: n주, end = 마지막 주 다음 인덱스 (null = 최신까지). 확대·이동은 이 값만 바꾸고 다시 그림 */
+const CHART_MIN = 12;
+function chartWin(td, view) {
+  const total = td.w.length, n = Math.max(Math.min(CHART_MIN, total), Math.min(total, Math.round(view.n)));
+  const end = Math.max(n, Math.min(total, view.end == null ? total : Math.round(view.end)));
+  return { n, end, start: end - n, total };
+}
+function drawChart(box, td, view) {
+  const cw = chartWin(td, view);
+  const w = td.w.slice(cw.start, cw.end), n = w.length;
   const W_ = Math.max(300, box.clientWidth), H = 300, RH = 86, pr = 48, pt = 8;
   const plotW = W_ - pr - 2, priceH = H - 24, volH = 54;
   let lo = Infinity, hi = -Infinity, vmax = 0, rlo = 0, rhi = 0;
@@ -192,10 +202,54 @@ function drawChart(box, td, weeks) {
     const ch = i > 0 ? (r[W.c] / w[i - 1][W.c] - 1) * 100 : null;
     info.innerHTML = `<span>${r[W.d]}</span><span>종가 <b>${fmt(r[W.c])}</b> ${ch === null ? "" : sgn(ch)}</span><span>30주선 <b>${fmt(r[W.ma])}</b></span><span>RS <b>${fmt(r[W.rs], 1)}</b></span><span>거래량 <b>${(r[W.v] / 1e6).toFixed(1)}M</b></span>`;
   };
-  const svg = $("svg", box);
-  const pick = e => { const b = svg.getBoundingClientRect(); const px = (e.clientX - b.left) * W_ / b.width; show(Math.max(0, Math.min(n - 1, Math.floor((px - 2) / (plotW / n))))); };
-  svg.addEventListener("pointermove", pick); svg.addEventListener("pointerdown", pick);
+  box._geo = { W_, plotW, n, show };
   show(n - 1);
+}
+/* 확대·이동: 두 손가락 벌리기/오므리기(+옆으로 끌면 이동), 마우스 휠, 버튼. 한 손가락은 지금처럼 그 주 값 보기 */
+function bindChartZoom(box, td, view, redraw) {
+  const pts = new Map();
+  let pinch = null, raf = 0;
+  const frac = clientX => { const b = box.getBoundingClientRect(), g = box._geo; return Math.max(0, Math.min(1, ((clientX - b.left) * g.W_ / b.width - 2) / g.plotW)); };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; redraw(); }); };
+  const setWin = (n, anchorIdx, anchorFrac) => {
+    const total = td.w.length;
+    n = Math.max(Math.min(CHART_MIN, total), Math.min(total, n));
+    let end = anchorIdx - anchorFrac * n + n;
+    end = Math.max(n, Math.min(total, end));
+    view.n = n; view.end = end >= total - 0.5 ? null : end;
+  };
+  const pick = e => { const g = box._geo; if (g) g.show(Math.max(0, Math.min(g.n - 1, Math.floor(frac(e.clientX) * g.n)))); };
+  box.addEventListener("pointerdown", e => {
+    pts.set(e.pointerId, e.clientX);
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()], cw = chartWin(td, view), mid = (a + b) / 2;
+      pinch = { d0: Math.max(20, Math.abs(a - b)), n0: cw.n, anchor: cw.start + frac(mid) * cw.n };
+    } else pick(e);
+  });
+  box.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) { if (e.pointerType === "mouse") pick(e); return; }
+    pts.set(e.pointerId, e.clientX);
+    if (pinch && pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      setWin(pinch.n0 * pinch.d0 / Math.max(20, Math.abs(a - b)), pinch.anchor, frac((a + b) / 2));
+      schedule();
+    } else if (!pinch) pick(e);
+  });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  box.addEventListener("pointerup", up); box.addEventListener("pointercancel", up); box.addEventListener("pointerleave", e => { if (e.pointerType === "mouse") up(e); });
+  box.addEventListener("wheel", e => {
+    e.preventDefault();
+    const cw = chartWin(td, view), f = frac(e.clientX);
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) setWin(cw.n, cw.start + f * cw.n + e.deltaX / 40, f);      // 가로 스크롤 = 이동
+    else setWin(cw.n * (e.deltaY > 0 ? 1.15 : 1 / 1.15), cw.start + f * cw.n, f);
+    schedule();
+  }, { passive: false });
+}
+function chartStep(td, view, act) {
+  const cw = chartWin(td, view), total = td.w.length;
+  if (act === "in" || act === "out") { const n = Math.round(cw.n * (act === "in" ? 0.67 : 1.5)); view.n = Math.max(Math.min(CHART_MIN, total), Math.min(total, n)); if (view.end != null) view.end = Math.min(total, Math.max(view.n, cw.end)); }
+  else if (act === "left" || act === "right") { const step = Math.max(1, Math.round(cw.n / 3)), end = cw.end + (act === "left" ? -step : step); view.end = end >= total ? null : Math.max(cw.n, end); }
+  else if (act === "now") view.end = null;
 }
 
 /* ---------- 화면: 홈 ---------- */
@@ -205,6 +259,7 @@ async function viewHome(v) {
   const top = SUM.candidates.filter(c => c.signal && c.cap !== "소형").sort((a, b) => b.score - a.score).slice(0, 5);
   const secs = SUM.sectors;
   v.innerHTML = `
+  <a class="card item" href="#orders" style="text-decoration:none"><span class="pill st2">주문</span><span style="min-width:0"><b>이번 주 주문</b><div class="n">${(() => { const a = watchAge(store.get().settings); return a != null && a >= WATCH_DAYS - 5 ? `<b style="color:var(--s4)">자동감시주문 만료 임박 (${a}일 전 설정)</b>` : "매수·매도·손절 주문, 키움 자동감시 설정값 · 보내기/복사"; })()}</div></span><span class="r">›</span></a>
   <section class="card"><h3>시장</h3>${mrow}
     ${worst === 4 ? `<div class="warn">시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>` : worst === 3 ? `<div class="warn">시장 3단계: 매수 규모 축소, 손절 좁히기</div>` : ""}
   </section>
@@ -239,7 +294,7 @@ function planLines(c) {
 function candItem(c, rank) {
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
-    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
+    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}${c.mvOk ? ` <span class="pill st2" title="미너비니 트렌드 템플릿 충족">미너비니</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
     <span class="sub" style="display:grid;gap:2px">${planLines(c)}<span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급${c.brkVr ? ` · 돌파 주 거래량 <b>${fmt(c.brkVr, 1)}배</b>` : ""}</span></span></a>`;
 }
@@ -247,12 +302,13 @@ function candItem(c, rank) {
 /* ---------- 화면: 후보 ---------- */
 let candTab = "1→2 돌파", capTab = "대·중형";
 function viewCands(v) {
-  const tabs = ["1→2 돌파", "돌파", "풀백", "베이스 대기", "65점+"];
-  const inTab = (c, t) => t === "65점+" ? c.score >= 65 : t === "1→2 돌파" ? c.kind === "1→2 돌파" : c.signal === t;
+  const buyTab = `매수 ${BUY_SCORE}+`;
+  const tabs = [buyTab, "1→2 돌파", "돌파", "풀백", "베이스 대기", "65점+"];
+  const inTab = (c, t) => t === buyTab ? !!c.signal && c.score >= BUY_SCORE : t === "65점+" ? c.score >= 65 : t === "1→2 돌파" ? c.kind === "1→2 돌파" : c.signal === t;
   /* 소형주(러셀2000)는 백테스트 성적이 나빠 기본 목록에서 빼고, '소형(참고)'·'내 종목'에서만 보여줌 */
   const capOk = c => capTab === "대·중형" ? c.cap !== "소형" : capTab === "소형(참고)" ? c.cap === "소형" : capTab === "내 종목" ? c.mine : c.cap === capTab;
   const list = SUM.candidates.filter(c => capOk(c) && inTab(c, candTab)).sort((a, b) => b.score - a.score);
-  const desc = { "1→2 돌파": "1단계 기저(15주+)에서 막 2단계로 넘어가는 돌파 · 와인스테인의 최우선 매수 자리 (+10점)", "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선 풀백(-3~+5%) 또는 돌파선 되돌림(±3%)", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
+  const desc = { "1→2 돌파": "1단계 기저(15주+)에서 막 2단계로 넘어가는 돌파 · 와인스테인의 최우선 매수 자리 (+10점)", "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선 풀백(-3~+5%) 또는 돌파선 되돌림(±3%)", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상", [buyTab]: `돌파·풀백 신호 + 점수 ${BUY_SCORE}점 이상 · 백테스트 매수 기준` }[candTab];
   v.innerHTML = `<h1>후보</h1>
     <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && inTab(c, t)).length}</button>`).join("")}</div>
     <div class="seg" role="group">${["대·중형", "대형", "중형", "소형(참고)", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
@@ -312,8 +368,9 @@ async function viewStock(v, t) {
     </div>
     <div class="row"><b class="mono" style="font-size:22px">${fmt(last[W.c])}</b>${sgn(prev ? (last[W.c] / prev[W.c] - 1) * 100 : null)}<span class="muted" style="font-size:12px">주간 · ${last[W.d]} 주</span></div>
     <div class="seg" role="group">${[[52, "1년"], [104, "2년"], [156, "3년"]].map(([n, l]) => `<button data-wk="${n}" aria-pressed="${n === chartWeeks}">${l}</button>`).join("")}</div>
+    <div class="row zoombar" role="group" aria-label="차트 확대·이동"><button class="btn sm" data-z="left" aria-label="과거로">◀</button><button class="btn sm" data-z="out" aria-label="축소">－</button><button class="btn sm" data-z="in" aria-label="확대">＋</button><button class="btn sm" data-z="right" aria-label="최근 쪽으로">▶</button><button class="btn sm" data-z="now">최근</button></div>
     <div><div class="chartinfo"></div><div class="chartbox" id="chart"></div></div>
-    <p class="note"><span style="color:var(--ma)">━</span> 30주선 · 회색 막대 거래량 · 차트를 누르거나 끌면 그 주 값이 위에 나와요</p>
+    <p class="note"><span style="color:var(--ma)">━</span> 30주선 · 회색 막대 거래량 · 차트를 누르거나 끌면 그 주 값이 위에 나와요 · 두 손가락으로 벌리면 확대, 옆으로 끌면 이동 (PC는 마우스 휠)</p>
   </section>
   ${secMembers(t)}
   ${td.score != null ? `<section class="card"><h3>매수 계획</h3>
@@ -331,6 +388,7 @@ async function viewStock(v, t) {
     ${td.small ? `<div class="warn">소형주: 백테스트에서 성적이 나빴던 그룹이에요. 돌파는 그 주 거래량이 평균 2배 이상일 때만${td.brkVr ? ` (지금 ${fmt(td.brkVr, 1)}배)` : ""}, 손절은 주간 평균 변동폭(${fmt(td.atr)})×2로 넓히고 수량을 줄였어요.</div>` : ""}
     <p class="note">주문 요령 (백테스트 근거): 돌파 매수는 <b>스톱 지정가</b>로 · 지정가는 돌파 매수가 +2%${td.bkBuy ? ` (${fmt(td.bkBuy * 1.02)})` : ""}까지만 → 갭으로 그 위에서 시작하면 체결 안 됨 (갭 위 매수 0.96R vs 보통 1.93R). 손절은 금요일 종가가 손절가 아래면 매도 + 손절가 -3%${td.bkStop ? ` (${fmt(td.bkStop * 0.97)})` : ""}에 비상 자동 매도.</p>
     <p class="note">추천 수량: ${isKRW(t) ? "" : "환율 " + fmt(fxRate(), 0) + "원 기준, "}손절 시 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원의 ${s.riskPct}%만 잃는 수량${capped ? " · 손절폭이 좁아 계좌의 25%로 줄였어요" : ""}</p>
+    ${td.mvN != null ? `<p class="note">미너비니 트렌드 템플릿 <b style="color:${td.mvOk ? "var(--s2)" : "var(--muted)"}">${td.mvOk ? "충족" : "미충족"} (${td.mvN}/6)</b> · 30·40주선 위, 30주선 > 40주선, 40주선 상승, 52주 저점 +30% 이상, 52주 고점 -25% 이내. 참고용이에요 (백테스트: 충족 종목만 샀을 때 한 번은 연 +2%p, 다시 돌리면 차이 없음).</p>` : ""}
     ${viol.length ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}</div>` : `<div class="ok">와인스테인 기본 조건 통과</div>`}
     <div class="btns">${held ? `<a class="btn" href="#hold">보유 중 · 손절 관리 보기</a>` : `<button class="btn primary" id="buyBtn">매수 기록</button>`}</div>
   </section>
@@ -343,10 +401,13 @@ async function viewStock(v, t) {
   </section>` : `<section class="card"><p class="note">업종 ETF·지수는 단계만 표시합니다. 30주선 이격 ${pct(td.ext)}</p></section>`}`;
   bindSearch(v);
   const box = $("#chart", v);
-  const draw = () => drawChart(box, td, chartWeeks);
+  const view = { n: chartWeeks, end: null };
+  const draw = () => { drawChart(box, td, view); v.querySelectorAll("[data-wk]").forEach(x => x.setAttribute("aria-pressed", view.end == null && Math.round(view.n) === +x.dataset.wk)); };
   draw();
+  bindChartZoom(box, td, view, draw);
+  v.querySelectorAll("[data-z]").forEach(b => b.onclick = () => { chartStep(td, view, b.dataset.z); draw(); });
   const ssb = $("#secsmall", v); if (ssb) ssb.onclick = () => { secCapAll = !secCapAll; route(); };
-  v.querySelectorAll("[data-wk]").forEach(b => b.onclick = () => { chartWeeks = +b.dataset.wk; v.querySelectorAll("[data-wk]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
+  v.querySelectorAll("[data-wk]").forEach(b => b.onclick = () => { chartWeeks = +b.dataset.wk; view.n = chartWeeks; view.end = null; draw(); });
   window.onresize = () => { if (document.body.contains(box)) draw(); };
   const bb = $("#buyBtn", v); if (bb) bb.onclick = () => buySheet(td, qty, viol);
 }
@@ -586,9 +647,126 @@ function viewSettings(v) {
     if (r.ok) { const lm = r.headers.get("last-modified"); el.textContent = "최근 결과" + (lm ? " · " + new Date(lm).toLocaleDateString("ko-KR") : ""); $("#btlink", v).hidden = false; }
     else el.textContent = "아직 백테스트 결과가 없어요.";
   }).catch(() => { const el = $("#btinfo", v); if (el) el.textContent = "결과를 확인하지 못했어요."; });
-  $("#setf", v).onsubmit = e => { e.preventDefault(); const d = store.get(); d.settings = { account: +$("#g_acc", v).value || 0, riskPct: +$("#g_risk", v).value, maxPos: +$("#g_max", v).value || 6 }; store.save(); toast("저장했어요"); };
+  $("#setf", v).onsubmit = e => { e.preventDefault(); const d = store.get(); d.settings = { ...d.settings, account: +$("#g_acc", v).value || 0, riskPct: +$("#g_risk", v).value, maxPos: +$("#g_max", v).value || 6 }; store.save(); toast("저장했어요"); };
   $("#exp", v).onclick = () => { const blob = new Blob([JSON.stringify(store.get(), null, 1)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `stage-backup-${today()}.json`; document.body.appendChild(a); a.click(); a.remove(); };
   $("#imp", v).onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!Array.isArray(d.holdings) || !Array.isArray(d.trades)) throw 0; store.replace(d); toast(`불러왔어요 · 보유 ${d.holdings.length} · 거래 ${d.trades.length}`); } catch (_) { toast("백업 파일 형식이 아니에요"); } };
+}
+
+/* ---------- 화면: 이번 주 주문 ---------- */
+/* 백테스트 규칙 그대로: 매수는 신호 + 80점 이상(소형주 제외) · 빈자리만큼 점수 순 · 손절 시 계좌 riskPct% · 한 종목 최대 100/최대종목수%(25% 이하)
+   매도는 4단계 진입 또는 금요일 종가가 손절가 아래 → 월요일 매도, 나머지는 손절 주문 유지 */
+function orderQty(t, entry, stop, s) {
+  const acct = isKRW(t) ? s.account : s.account / fxRate(), risk = entry - stop;
+  if (!(risk > 0) || !(entry > 0)) return null;
+  const capPct = Math.min(25, 100 / (s.maxPos || 6));
+  return Math.max(0, Math.min(Math.floor(acct * s.riskPct / 100 / risk), Math.floor(acct * capPct / 100 / entry)));
+}
+async function weekOrders() {
+  const d = store.get(), s = d.settings, H = d.holdings, sells = [], keeps = [];
+  for (const h of H) {
+    try {
+      const td = await loadT(h.t), st = holdStatus(td, h);
+      if (td.stage === 4) sells.push({ h, why: "4단계 진입", close: st.close });
+      else if (st.close < st.stop) sells.push({ h, why: `금요일 종가 ${fmt(st.close)} < 손절 ${fmt(st.stop)}`, close: st.close });
+      else keeps.push({ h, stop: st.stop, close: st.close });
+    } catch (e) { keeps.push({ h, stop: +h.initStop, close: null, nodata: true }); }
+  }
+  const held = new Set(H.map(h => h.t));
+  const slots = Math.max(0, (s.maxPos || 6) - (H.length - sells.length));
+  const pool = SUM.worst === 4 ? [] : SUM.candidates.filter(c => c.signal && c.score >= BUY_SCORE && c.cap !== "소형" && !held.has(c.t)).sort((a, b) => b.score - a.score);
+  const buys = [];
+  for (const c of pool) {
+    if (buys.length >= slots) break;
+    let o = null;
+    if (c.signal === "돌파" && c.bkBuy && c.bkStatus === "돌파 대기") {
+      o = { kind: "스톱 지정가", stopPx: c.bkBuy, limit: Math.min(c.bkBuy * 1.02, c.bkMax || 1e12), entry: c.bkBuy, sl: c.bkStop, note: "가격이 스톱가에 닿으면 지정가로 매수 · 시가가 지정가 위면 체결 안 됨(갭 추격 금지)" };
+    } else if (c.signal === "돌파" && c.bkBuy && c.bkStatus === "돌파함 · 매수 가능") {
+      o = { kind: "지정가", limit: c.bkMax, entry: Math.min(c.close, c.bkMax), sl: c.bkStop, note: `이미 돌파함 · 월요일 ${fmt(c.bkMax)} 이하에서만 매수 (추격 한도)` };
+    } else if (c.signal === "풀백" && c.pbNow && c.pbStop) {
+      o = { kind: "지정가", limit: c.pbZone ? c.pbZone[1] : c.close, entry: c.close, sl: c.pbStop, note: `30주선 풀백 · 월요일 시가 근처 매수, ${fmt(c.pbZone ? c.pbZone[1] : c.close)} 위로 뛰면 보류` };
+    }
+    if (!o || !(o.entry > o.sl)) continue;
+    o.qty = orderQty(c.t, o.entry, o.sl, s);
+    if (!o.qty) continue;
+    buys.push({ c, ...o, emerg: o.sl * 0.97, amt: Math.round(toKRW(o.qty * o.entry, c.t)) });
+  }
+  return { sells, keeps, buys, slots, more: pool.length - buys.length, s };
+}
+/* 키움 자동감시주문(서버 감시)에 옮겨 넣을 값: 보유·신규 매수 종목의 비상 손절(스탑로스), 돌파 대기 종목의 매수 감시 */
+const WATCH_DAYS = 30;     // 미국 주식 자동감시주문 유효기간 (키움 화면에서 실제 값 확인)
+function watchRows(O) {
+  const sl = O.keeps.map(k => ({ t: k.h.t, side: "매도", trig: k.stop * 0.97, cond: "이하", qty: +k.h.shares, price: "시장가 (안 되면 감시가격 -1% 지정가)" }));
+  const by = O.buys.filter(b => b.stopPx).map(b => ({ t: b.c.t, side: "매수", trig: b.stopPx, cond: "이상", qty: b.qty, price: `지정가 ${fmt(b.limit)}` }));
+  const bsl = O.buys.map(b => ({ t: b.c.t, side: "매도", trig: b.emerg, cond: "이하", qty: b.qty, price: "시장가 (안 되면 감시가격 -1% 지정가)", after: true }));
+  return { sl, by, bsl };
+}
+function watchAge(s) {
+  if (!s.watchSetAt) return null;
+  return Math.floor((Date.now() - new Date(s.watchSetAt + "T00:00:00").getTime()) / 86400000);
+}
+function ordersText(O) {
+  const L = [`[와인스테인 이번 주 주문] ${SUM.updated ? new Date(SUM.updated).toLocaleDateString("ko-KR") : ""} 데이터`];
+  if (O.sells.length) { L.push("", "■ 매도 (월요일 장 시작)"); O.sells.forEach(x => L.push(`- ${x.h.t} ${x.h.shares}주 매도 · ${x.why}`)); }
+  if (O.buys.length) {
+    L.push("", "■ 매수");
+    O.buys.forEach(b => L.push(`- ${b.c.t} (${b.c.kind || b.c.signal} · ${b.c.score}점) ${b.stopPx ? `스톱 ${fmt(b.stopPx)} · 지정가` : "지정가"} ${fmt(b.limit)} · ${b.qty}주`,
+      `  손절: 금요일 종가 ${fmt(b.sl)} 아래면 매도 · 비상 자동 매도 ${fmt(b.emerg)}`));
+  }
+  if (O.keeps.length) { L.push("", "■ 보유 유지 (손절 주문 확인)"); O.keeps.forEach(k => L.push(`- ${k.h.t}: 금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 ${fmt(k.stop * 0.97)}`)); }
+  if (!O.sells.length && !O.buys.length) L.push("", "이번 주 새 주문 없음");
+  const R = watchRows(O), line = r => `- ${r.t} ${r.side}: 현재가 ${fmt(r.trig)} ${r.cond} → ${r.price} · ${r.qty}주${r.after ? " (매수 체결 뒤)" : ""}`;
+  if (R.sl.length || R.by.length || R.bsl.length) {
+    L.push("", `■ 키움 자동감시주문 (유효 ${WATCH_DAYS}일)`);
+    [...R.sl, ...R.by, ...R.bsl].forEach(r => L.push(line(r)));
+  }
+  return L.join("\n");
+}
+async function viewOrders(v) {
+  v.innerHTML = `<h1>이번 주 주문</h1><div class="muted">계산 중…</div>`;
+  const O = await weekOrders();
+  if (!document.body.contains(v)) return;
+  const s = O.s;
+  v.innerHTML = `<h1>이번 주 주문</h1>
+  ${SUM.weekComplete ? "" : `<div class="warn">이번 주봉이 아직 확정되지 않았어요(주중 데이터). 주문은 금요일 미국장 마감 뒤, 토요일에 확정해서 넣으세요.</div>`}
+  ${SUM.worst === 4 ? `<div class="warn">시장 4단계: 신규 매수 없음 (매도·손절만)</div>` : ""}
+  <section class="card"><h3>매도 ${O.sells.length}건</h3>
+    ${O.sells.length ? `<div class="list">${O.sells.map(x => `<a class="item" href="#stock/${encodeURIComponent(x.h.t)}"><span class="pill st4">매도</span><span style="min-width:0"><b class="mono">${esc(x.h.t)}</b> ${x.h.shares}주<div class="n">${esc(x.why)} · 월요일 장 시작에 매도</div></span><span class="r"><b>${fmt(x.close)}</b></span></a>`).join("")}</div>` : `<p class="note">팔 종목이 없어요.</p>`}
+  </section>
+  <section class="card"><h3>매수 ${O.buys.length}건 <span class="muted" style="font-size:12px;font-weight:400">빈자리 ${O.slots} · ${BUY_SCORE}점+ 신호 · 소형주 제외</span></h3>
+    ${O.buys.length ? `<div class="list">${O.buys.map(b => `<a class="item" href="#stock/${encodeURIComponent(b.c.t)}">${ring(b.c.score, 42)}
+      <span style="min-width:0"><b class="mono">${esc(b.c.t)}</b> <span class="pill st2">${esc(b.c.kind || b.c.signal)}</span>${b.c.mvOk ? ` <span class="pill st2">미너비니</span>` : ""}
+        <div class="n">${b.stopPx ? `스톱 지정가 · 스톱 <b>${fmt(b.stopPx)}</b> · 지정가` : "지정가"} <b>${fmt(b.limit)}</b> · <b>${b.qty}주</b> (약 ${(b.amt / 10000).toFixed(0)}만원)</div>
+        <div class="n">손절: 금요일 종가 <b style="color:var(--s4)">${fmt(b.sl)}</b> 아래면 매도 · 비상 자동 매도 <b style="color:var(--s4)">${fmt(b.emerg)}</b></div>
+        <div class="n muted">${esc(b.note)}</div></span><span></span></a>`).join("")}</div>`
+      : `<p class="note">${O.slots ? "조건에 맞는 매수 신호가 없어요." : `빈자리가 없어요 (최대 ${s.maxPos}종목).`}</p>`}
+    ${O.more > 0 && O.buys.length ? `<p class="note">자리가 없어 빠진 ${BUY_SCORE}점+ 신호 ${O.more}개는 '후보 → 매수 ${BUY_SCORE}+'에서 볼 수 있어요.</p>` : ""}
+  </section>
+  ${O.keeps.length ? `<section class="card"><h3>보유 유지 ${O.keeps.length}종목</h3><p class="note">증권사에 걸어 둔 손절 주문이 맞는지 확인하세요.</p>
+    <div class="list">${O.keeps.map(k => `<a class="item" href="#stock/${encodeURIComponent(k.h.t)}"><span class="pill st2">유지</span><span style="min-width:0"><b class="mono">${esc(k.h.t)}</b> ${k.h.shares}주<div class="n">금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 자동 매도 ${fmt(k.stop * 0.97)}</div></span><span class="r"><b>${fmt(k.close)}</b></span></a>`).join("")}</div></section>` : ""}
+  ${(() => {
+    const R = watchRows(O), age = watchAge(s);
+    if (!R.sl.length && !R.by.length && !R.bsl.length) return "";
+    const row = r => `<div class="item"><span class="pill ${r.side === "매수" ? "st2" : "st4"}">${r.side}</span><span style="min-width:0"><b class="mono">${esc(r.t)}</b> ${r.qty}주${r.after ? ` <span class="tag">매수 체결 뒤</span>` : ""}
+      <div class="n">감시 조건: 현재가 <b>${fmt(r.trig)}</b> ${r.cond}</div><div class="n">주문: ${esc(r.price)}</div></span><span></span></div>`;
+    return `<section class="card"><h3>키움 자동감시주문 설정값</h3>
+      <p class="note">키움 서버가 대신 가격을 감시해요(휴대폰이 꺼져 있어도 됨). 영웅문S# → 해외주식 → 자동감시주문에서 아래 값을 그대로 넣으세요.</p>
+      ${age == null ? `<div class="warn">설정한 날짜가 기록돼 있지 않아요. 키움에 넣은 뒤 아래 '오늘 설정함'을 눌러 두면 만료 전에 알려 드려요.</div>`
+        : age >= WATCH_DAYS - 5 ? `<div class="warn">마지막 설정 ${age}일 전 · 유효기간(${WATCH_DAYS}일)이 곧 끝나요. 다시 설정하세요.</div>`
+        : `<p class="note">마지막 설정 ${age}일 전 (${esc(s.watchSetAt)}) · ${WATCH_DAYS - age}일 남음</p>`}
+      ${R.sl.length ? `<h4>보유 종목 비상 손절 (스탑로스)</h4><div class="list">${R.sl.map(row).join("")}</div>` : ""}
+      ${R.by.length ? `<h4>돌파 매수 감시</h4><p class="note">미국 주식에서 '매수' 감시가 되는지 키움 화면에서 확인하세요. 안 되면 위 매수 목록대로 스톱 지정가나 직접 주문으로 넣으세요.</p><div class="list">${R.by.map(row).join("")}</div>` : ""}
+      ${R.bsl.length ? `<h4>새로 산 종목 비상 손절</h4><div class="list">${R.bsl.map(row).join("")}</div>` : ""}
+      <p class="note">금요일 종가 손절과 4단계 매도는 가격 감시로 걸 수 없어요. 토요일에 이 화면의 '매도'를 보고 월요일에 직접 파세요. 트레일링 스탑은 쓰지 마세요(백테스트에서 일찍 파는 규칙은 모두 손해).</p>
+      <div class="btns"><button class="btn sm" id="wset">오늘 설정함</button></div></section>`;
+  })()}
+  <section class="card"><div class="btns"><button class="btn primary" id="oshare">주문 목록 보내기·복사</button></div>
+    <p class="note">수량은 계좌 ${Math.round(s.account / 10000).toLocaleString()}만원 · 손절 시 ${s.riskPct}% 손실 · 한 종목 최대 ${Math.min(25, 100 / (s.maxPos || 6)).toFixed(0)}% 기준이에요(설정에서 바꿀 수 있어요). 자동 계산 결과라 주문 전에 차트를 한 번 더 확인하세요. 투자 조언이 아니며 수익을 보장하지 않습니다.</p></section>`;
+  const ws = $("#wset", v); if (ws) ws.onclick = () => { const d = store.get(); d.settings.watchSetAt = today(); store.save(); toast("설정 날짜를 기록했어요"); viewOrders(v); };
+  $("#oshare", v).onclick = async () => {
+    const text = ordersText(O);
+    try { if (navigator.share) { await navigator.share({ title: "이번 주 주문", text }); return; } } catch (e) { if (e && e.name === "AbortError") return; }
+    try { await navigator.clipboard.writeText(text); toast("주문 목록을 복사했어요"); } catch (e) { toast("복사하지 못했어요"); }
+  };
 }
 
 /* ---------- 라우터 ---------- */
@@ -601,6 +779,7 @@ async function route() {
   window.onresize = null;
   try {
     if (tab === "cands") viewCands(v);
+    else if (tab === "orders") await viewOrders(v);
     else if (tab === "stock") await viewStock(v, arg ? decodeURIComponent(arg).toUpperCase() : "");
     else if (tab === "hold") await viewHold(v);
     else if (tab === "journal") await viewJournal(v);

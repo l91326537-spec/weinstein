@@ -8,7 +8,7 @@
         → 이후 30주선·최근 8주 저점 중 높은 쪽 아래로 추적 (주중 저가가 닿으면 매도)
         → 종목이 4단계로 바뀌면 다음 주 시가에 매도
 - 비교: SPY, QQQ, 같은 종목들을 똑같이 나눠 들고 있었을 때(동일가중)
-실행: python backtest.py                (기본: 2006년부터, 점수 70 이상)
+실행: python backtest.py                (기본: 2006년부터, 점수 80 이상)
       python backtest.py --quick        (나스닥100만, 빠른 확인)
       python backtest.py --start 2010-01-01 --min-score 80
 """
@@ -72,12 +72,12 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
         qL, qB, qP, qT, qPt = [], [], [], [], []
-        qC, qD = [], []
+        qC, qD, qS = [], [], []
         ddv = f["dd52"].values
         isb = []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); qS.append(0); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -97,7 +97,7 @@ def build_frames(dfs, uni):
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
             qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
-            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0))
+            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(1 if q.get("sqz_on") else 0)
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
@@ -107,7 +107,8 @@ def build_frames(dfs, uni):
         dd = np.nan_to_num(ddv, nan=0.0)
         ov = np.where(dd <= -25, -10, np.where(dd <= -15, -5, 0))
         ovp = np.where(np.array(isb), 0, ov)
-        cur = base + T + Pt
+        f["sqz_on"] = np.array(qS, float)              # 볼린저 수축 뒤 돌파·풀백 (가점 크기와 무관)
+        cur = base + T + Pt + f["sqz_on"].values * S.CFG["squeeze_pts"]      # 볼린저 수축 가점 (앱 점수와 같게)
         C, D = np.array(qC, float), np.array(qD, float)
         for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D)):
             v = np.clip(s2 + a, 0, 100)
@@ -200,7 +201,7 @@ def collect_signals(frames, start, min_score_floor=50, ver=1):
 
 
 # ---------------- 거래량·매수 시점 비교용 ----------------
-def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False, emerg=None):
+def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dyn_ma=False, emerg=None, ma_exit=None, chand=None):
     """mode: 'intra'=장중 손절가 닿으면 매도(자동 매도) | 'close'=금요일 종가가 손절가 아래면 그 종가에 매도
        dyn_ma: 손절가 대신 '금요일 종가가 30주선 아래면 매도' (s0는 수량 계산용 명목 손절)"""
     ma_v = f["ma30"].values
@@ -216,6 +217,8 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
             return (f.index[j], f.index[j + 1], e, px, (px - e) / risk, 1, "돌파 거래량 부족", s0)
         j += 1
     s_orig, moved = s0, False
+    atr_v = f["atr10"].values if chand else None
+    hh = e
     while j < len(f):
         if be and not moved and j - j0 >= be:
             moved = True
@@ -235,6 +238,13 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
         elif lo[j] <= s0:
             px = min(s0, o[j])
             return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "손절" if s0 == s_orig else "본전 손절", s_orig)
+        if chand:                               # 샹들리에: 매수 후 최고 종가 - ATR×chand 아래로 금요일 마감하면 매도
+            hh = max(hh, c[j])
+            if not math.isnan(atr_v[j]) and c[j] < hh - chand * atr_v[j]:
+                return (f.index[j0], f.index[j], e, c[j], (c[j] - e) / risk, j - j0, "샹들리에 청산", s_orig)
+        if ma_exit is not None and not math.isnan(ma_v[j]) and c[j] < ma_v[j] * (1 - ma_exit / 100):   # 금요일 종가가 30주선 -ma_exit% 아래
+            px = c[j]
+            return (f.index[j0], f.index[j], e, px, (px - e) / risk, j - j0, "30주선 종가 이탈", s_orig)
         if stg[j] == 4 and j + 1 < len(f):
             px = o[j + 1]
             return (f.index[j0], f.index[j + 1], e, px, (px - e) / risk, j - j0 + 1, "4단계 진입", s0)
@@ -441,7 +451,10 @@ def e_pos(r):
 
 
 def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2",
-                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None):
+                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None,
+                    vol_need=None, min_base=0, max_gap=None, ma_exit=None, chand=None):
+    """vol_need: 돌파 매수한 주 거래량이 이 배수 미만이면 다음 주 시가 매도 · min_base: 기저가 이 주 수 미만인 돌파는 안 삼
+       max_gap: 시가가 매수 스톱 가격보다 이 % 넘게 위에서 시작하면 그 돌파는 건너뜀"""
     """mh: 잔고점 돌파 dict(stop='pct'|'low3', bonus=점수 가점, k=최근 몇 주 고점)
        block_rebreak: 돌파 매수가 손절로 끝난 뒤 이 주 수 동안 같은 종목 돌파 재매수 안 함"""
     """rt_stop: 돌파선 되돌림 풀백의 손절을 '돌파선 -3%·3주 저점 -1% 중 낮은 쪽'으로
@@ -530,7 +543,7 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 s0 = widen(s0, e, i)
                 if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose", emerg)
+                tr = _hold_from(f, i + 1, e, s0, False, None, be, stop_mode, pb_stop == "maclose", emerg, ma_exit, chand)
             elif g == "돌파" and entry_rule == "monday":
                 if vol_rule == "strict" and not (bvr[i] >= 2.0):
                     continue
@@ -585,11 +598,15 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 rebreak = (j - last_bk_stop) <= 13
                 if block_rebreak and (j - last_bk_stop) <= block_rebreak:
                     continue
+                if min_base and not (blen[i] >= min_base):
+                    continue
+                if max_gap is not None and o[j] > trig * (1 + max_gap / 100):
+                    continue
                 e = max(o[j], trig)
                 s0 = widen(e * (1 - pct / 100), e, i)
                 if (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be, stop_mode, False, emerg)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else vol_need, be, stop_mode, False, emerg, ma_exit, chand)
                 gapk = "up" if o[j] >= trig else ("down" if o[j] <= c[i] * 0.98 else "normal")
                 last_entry = j
                 ent, ex, e, px, R, wk, why, s0 = tr
@@ -608,7 +625,7 @@ def _victim(pos, frames, d, mode, new_score):
     """갈아타기: 팔 보유 종목 고르기 (지난주 종가까지의 정보만 사용, 4주 이상 보유한 종목만)"""
     best, best_sc = None, None
     for t, p in pos.items():
-        if (d - p["r"]["entry_date"]).days < 28:
+        if p.get("add") or (d - p["r"]["entry_date"]).days < 28:
             continue
         f = frames[t]
         i = f.index.searchsorted(d) - 1
@@ -625,11 +642,17 @@ def _victim(pos, frames, d, mode, new_score):
     return best
 
 
-def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None):
-    """fill: 남는 돈을 ETF로 채우기. dict(o=시가, c=종가, mkt=시장 단계, frac=채울 비율, half3=3단계면 절반, filt=4단계면 매도, band=리밸런싱 폭%)"""
+def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None):
+    """order: 같은 주·같은 점수일 때 이 열이 작은 신호부터 (예: beta)
+       추매 행(add=True): 같은 종목을 들고 있을 때만 사고, 종목 수에 세지 않음 · 수량은 위험 절반, 비중 상한 절반
+    fill: 남는 돈을 ETF로 채우기. dict(o=시가, c=종가, mkt=시장 단계, frac=채울 비율, half3=3단계면 절반, filt=4단계면 매도, band=리밸런싱 폭%)"""
     mp = max_pos or BT["max_pos"]
     etf_sh, inv_sum = 0.0, 0.0
-    cands = sig[(sig["score"] >= min_score)].sort_values(["entry_date", "score"], ascending=[True, False])
+    cands = sig[(sig["score"] >= min_score)]
+    if order:
+        cands = cands.sort_values(["entry_date", "score", order], ascending=[True, False, True])
+    else:
+        cands = cands.sort_values(["entry_date", "score"], ascending=[True, False])
     by_week = {d: g for d, g in cands.groupby("entry_date")}
     cash, equity = 100.0, 100.0
     pos = {}       # ticker -> dict(shares, exit_date, exit, frame)
@@ -660,11 +683,14 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
         # 1) 이번 주 시가 매수 (지난주까지의 자금으로), 자리가 꽉 찼으면 갈아타기 규칙 확인
         if d in by_week:
             for _, r in by_week[d].iterrows():
-                if r["ticker"] in pos:
+                is_add = r.get("add") == True                # 추매가 아닌 행은 NaN일 수 있음 (bool(NaN)은 참)
+                key = r["ticker"] + "+" if is_add else r["ticker"]
+                if key in pos or (is_add and r["ticker"] not in pos):
                     continue
-                if max_small is not None and caps.get(r["ticker"]) == "소형" and sum(caps.get(x) == "소형" for x in pos) >= max_small:
+                nbase = sum(1 for p in pos.values() if not p.get("add"))
+                if not is_add and max_small is not None and caps.get(r["ticker"]) == "소형" and sum(caps.get(x) == "소형" for x in pos) >= max_small:
                     continue
-                if len(pos) >= mp:
+                if not is_add and nbase >= mp:
                     if not rotate or r["score"] < rot_min:
                         continue
                     v = _victim(pos, frames, d, rotate, r["score"])
@@ -675,6 +701,9 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                         continue
                     p = pos.pop(v)
                     cash += p["shares"] * px * (1 - cost)
+                    pa = pos.pop(v + "+", None)          # 추매분도 같이 정리
+                    if pa:
+                        cash += pa["shares"] * px * (1 - cost)
                     rr = p["r"].copy()
                     risk0 = rr["entry"] - rr["stop0"]
                     rr["exit"], rr["exit_date"], rr["why"] = px, d, "갈아타기"
@@ -684,9 +713,10 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 risk_ps = r["entry"] - r["stop0"]
                 if risk_ps <= 0:
                     continue
-                shares = equity * BT["risk_pct"] / 100 / risk_ps
+                k_ = 0.5 if is_add else 1.0
+                shares = equity * BT["risk_pct"] * k_ / 100 / risk_ps
                 liquid = cash + (etf_sh * eo if eo is not None else 0)
-                val = min(shares * r["entry"], equity * wcap / 100, liquid / (1 + 2 * cost))
+                val = min(shares * r["entry"], equity * wcap * k_ / 100, liquid / (1 + 2 * cost))
                 if val < equity * 0.01:
                     continue
                 shares = val / r["entry"]
@@ -695,7 +725,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                     sell = min(-cash / (1 - cost), etf_sh * eo)
                     etf_sh -= sell / eo
                     cash += sell * (1 - cost)
-                pos[r["ticker"]] = dict(shares=shares, exit_date=r["exit_date"], exit=r["exit"], r=r)
+                pos[key] = dict(shares=shares, exit_date=r["exit_date"], exit=r["exit"], r=r, add=is_add)
         # 2) 이번 주 청산
         for t in list(pos):
             p = pos[t]
@@ -706,7 +736,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
         # 3) 주말 평가
         mv = 0.0
         for t, p in pos.items():
-            cl = frames[t]["close"]
+            cl = frames[p["r"]["ticker"]]["close"]
             px = cl.asof(d)
             mv += p["shares"] * (px if pd.notna(px) else p["r"]["entry"])
         ev = 0.0
@@ -778,7 +808,8 @@ def line_svg(series, w=1000, h=320):
     return "".join(parts) + f'<div class="leg">{leg}</div>'
 
 
-def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None):
+def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None,
+                 improve=None, imp_curves=None, imp_base=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -817,6 +848,21 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         P.append("</table></div>")
         if exit_curves:
             P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
+    if improve:
+        P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(imp_base or best or '')}</b> 규칙(앱 주문 요령 · 6종목 · QQQ 채우기)에 하나씩 바꿔 본 결과. "
+                 f"필터는 이 20년 데이터의 신호 표를 보고 고른 것이라, 앞 기간(~{IMPROVE_SPLIT.year - 1})과 뒤 기간({IMPROVE_SPLIT.year}~) 모두에서 '지금'보다 나아야 믿을 만해요. "
+                 "반반 조합은 매주 50:50으로 맞춘다고 가정했고 그 리밸런싱 비용은 빠져 있어요.</div>"
+                 "<div class=tw><table><tr><th class=l>변형</th><th>연평균</th><th>최대 낙폭</th><th>연평균/최대낙폭</th><th>거래</th><th>승률</th><th>평균 R</th>"
+                 f"<th>~{IMPROVE_SPLIT.year - 1} 연평균</th><th>~{IMPROVE_SPLIT.year - 1} 낙폭</th><th>{IMPROVE_SPLIT.year}~ 연평균</th><th>{IMPROVE_SPLIT.year}~ 낙폭</th></tr>")
+        for r in improve:
+            c_, t_, a_, b_ = r["c"], r["t"], r["a"], r["b"]
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b><div class=mut style='font-size:12px;white-space:normal;min-width:220px'>{e(r['desc'])}</div></td>"
+                     f"<td>{sgn(c_.get('cagr'))}</td><td>{sgn(c_.get('mdd'))}</td><td>{f_(c_.get('mar'), 2)}</td>"
+                     f"<td>{t_.get('n', '–')}</td><td>{f_(t_.get('win'), 0, True)}</td><td>{f_(t_.get('avgR'), 2)}</td>"
+                     f"<td>{sgn(a_.get('cagr'))}</td><td>{sgn(a_.get('mdd'))}</td><td>{sgn(b_.get('cagr'))}</td><td>{sgn(b_.get('mdd'))}</td></tr>")
+        P.append("</table></div>")
+        if imp_curves:
+            P.append("<div class=card style='margin-top:8px'>" + line_svg(imp_curves) + "</div>")
     if seg:
         P.append(f"<h2>대형 · 중형 · 소형 비교</h2><div class=mut style='margin-bottom:6px'>{e(best or '')} 규칙으로 크기별 종목만 따로 돌린 결과. "
                  "대형=S&P500·나스닥100, 중형=S&P400, 소형=러셀2000. 소형주일수록 생존 편향이 커서 실제보다 좋게 나오는 점을 감안하세요.</div>"
@@ -884,11 +930,211 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         fh.write("".join(P))
 
 
+# ---------------- 수익률 개선 후보 ----------------
+IMPROVE_SPLIT = pd.Timestamp("2016-01-01")   # 앞·뒤 기간을 나눠 필터가 두 기간 모두에서 통하는지 확인
+IMPROVE_BASE = "금요일 종가 + 비상 손절 -3%"   # 앱 주문 요령과 같은 규칙. ★는 실행마다 데이터 차이로 바뀔 수 있어 기준은 고정
+
+
+TECH_COLS = ("minervini", "rs_rank", "mom_rank", "rsi14", "macd_up", "adx14", "golden", "squeeze")
+
+
+def tech_indicators(frames, cal):
+    """유명한 기술적 지표를 주봉으로 (각 주 금요일까지의 값만)"""
+    print("기술적 지표 계산 중 (미너비니·RS 순위·RSI·MACD·ADX·볼린저)...")
+    for f in frames.values():
+        if "rsi14" in f:
+            continue
+        c, h, l = f["close"], f["high"], f["low"]
+        pc = c.shift(1)
+        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+        ma40, ma10 = c.rolling(40).mean(), c.rolling(10).mean()      # 미너비니·볼린저·ATR은 screener.indicators에서 계산
+        d = c.diff()
+        g, ls = d.clip(lower=0).ewm(alpha=1 / 14).mean(), (-d.clip(upper=0)).ewm(alpha=1 / 14).mean()
+        f["rsi14"] = 100 - 100 / (1 + g / ls)
+        macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
+        f["macd_up"] = (macd > macd.ewm(span=9).mean()).astype(float)
+        up, dn = h.diff(), -l.diff()
+        pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=f.index)
+        mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=f.index)
+        atr14 = tr.ewm(alpha=1 / 14).mean()
+        pdi, mdi = 100 * pdm.ewm(alpha=1 / 14).mean() / atr14, 100 * mdm.ewm(alpha=1 / 14).mean() / atr14
+        f["adx14"] = (100 * (pdi - mdi).abs() / (pdi + mdi)).ewm(alpha=1 / 14).mean()
+        f["golden"] = (ma10 > ma40).astype(float)
+    # 전체 종목 대비 순위 (그 주에 데이터가 있는 종목끼리)
+    cl = pd.concat({t: f["close"] for t, f in frames.items()}, axis=1)
+    r12 = (cl / cl.shift(52) - 1).rank(axis=1, pct=True) * 100
+    m121 = (cl.shift(4) / cl.shift(52) - 1).rank(axis=1, pct=True) * 100
+    for t, f in frames.items():
+        f["rs_rank"], f["mom_rank"] = r12[t].reindex(f.index), m121[t].reindex(f.index)
+
+
+def tech_masks(tk):
+    """(이름, 설명, 통과 여부 배열)"""
+    return [
+        ("미너비니 트렌드 템플릿", "30·40주선 위 · 30주선>40주선 · 40주선 상승 · 52주 저점 +30% 이상 · 52주 고점 -25% 이내", tk["minervini"] == 1),
+        ("오닐 RS 순위 상위 20%", "12개월 수익률이 전체 종목 중 상위 20% (IBD RS 80+와 비슷)", tk["rs_rank"] >= 80),
+        ("12-1 모멘텀 상위 30%", "최근 4주를 뺀 12개월 수익률이 상위 30%", tk["mom_rank"] >= 70),
+        ("RSI(14주) 50~80", "주봉 RSI가 50 이상 80 이하일 때만 (약세·과열 제외)", (tk["rsi14"] >= 50) & (tk["rsi14"] <= 80)),
+        ("MACD 시그널 위", "주봉 MACD(12·26)가 시그널(9) 위일 때만", tk["macd_up"] == 1),
+        ("ADX(14주) 25 이상", "추세 강도 ADX가 25 이상일 때만", tk["adx14"] >= 25),
+        ("골든크로스", "10주선이 40주선 위 (일봉 50·200일선과 비슷)", tk["golden"] == 1),
+        ("볼린저 수축 뒤", "최근 8주 안에 볼린저 밴드 폭이 52주 하위 25%까지 좁아졌던 종목 (VCP와 비슷)", tk["squeeze"] == 1),
+        ("미너비니 + RS 상위 20%", "트렌드 템플릿과 RS 순위 상위 20%를 모두 충족", (tk["minervini"] == 1) & (tk["rs_rank"] >= 80)),
+    ]
+
+
+def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn):
+    """지금 최적 규칙(best_run)에서 하나씩 바꿔 본 포트폴리오 결과. 반환: (표 행 목록, 곡선 dict)"""
+    sig0, eq0, tr0 = best_run
+    ms0 = args.min_score
+
+    def weak_out(df):
+        """신호 주(풀백은 매수 주)까지 알 수 있는 정보로 약한 셋업 빼기:
+           풀백인데 최근 13주 안 30주선 -3% 이탈 · 30주선이 52주 최저보다 +60% 이상(후반) · 헤드앤숄더 천장 뒤 · 2주 안 실적 발표를 앞둔 풀백"""
+        if df.empty:
+            return df
+        g = lambda col: np.array([frames[t].at[d, col] for t, d in zip(df["ticker"], df["sig_date"])], float)
+        mr, rise, hst = g("min_rel13"), g("ma_rise52"), g("hs_top")
+        ea = np.array([near_earn(t, d) for t, d in zip(df["ticker"], df["entry_date"])], float)
+        pb = (df["signal"] == "풀백").values
+        bad = (pb & (mr < 0.97)) | (rise >= S.CFG["late_rise"]) | (hst > 0) | (pb & (ea == 1))
+        return df[~bad]
+
+    def run(sg, ms=None, risk=None, mp_=None, order=None):
+        old = BT["risk_pct"]
+        if risk:
+            BT["risk_pct"] = risk
+        try:
+            return run_portfolio(sg, frames, cal, ms or ms0, max_pos=mp_ or mp, fill=fill, max_small=msmall, caps=capmap, order=order)
+        finally:
+            BT["risk_pct"] = old
+
+    # 베타: 신호 주까지 52주 주간 수익률로 S&P500 대비
+    bench_r = dfs["^GSPC"]["Close"].pct_change()
+    for f in frames.values():
+        if "beta" not in f:
+            r_ = f["close"].pct_change()
+            b_ = bench_r.reindex(f.index)
+            f["beta"] = r_.rolling(52, min_periods=40).cov(b_) / b_.rolling(52, min_periods=40).var()
+
+    def tag(df, col, date_col="sig_date"):
+        return np.array([frames[t].at[d, col] for t, d in zip(df["ticker"], df[date_col])], float) if len(df) else np.array([])
+
+    def add_ons(df):
+        """수익 +5% 중인 보유 종목이 10주선에 닿으면 추매 (RS>0·10주선 상승 중). 손절은 10주선 -5%, 원래 포지션이 먼저 끝나면 같이 정리"""
+        out = []
+        for _, r in df.iterrows():
+            f = frames[r["ticker"]]
+            j0 = f.index.get_loc(r["entry_date"])
+            ex = f.index.get_loc(r["exit_date"]) if pd.notna(r["exit_date"]) else len(f) - 1
+            o, lo, c = f["open"].values, f["low"].values, f["close"].values
+            ma10 = f["close"].rolling(10).mean().values
+            rs = f["rs"].values
+            for k in range(j0 + 2, ex):
+                ln = ma10[k - 1]
+                if math.isnan(ln) or c[k - 1] <= r["entry"] * 1.05 or c[k - 1] <= ln * 1.01:
+                    continue
+                if not (rs[k - 1] > 0 and ma10[k - 1] > ma10[k - 2]):
+                    continue
+                if lo[k] <= ln * 1.01:
+                    px = min(o[k], ln * 1.01)
+                    st = ln * 0.95
+                    tr = _hold_from(f, k, px, st, True, None, None, kw.get("stop_mode", "intra"), False, kw.get("emerg"))
+                    xd, xp, why = tr[1], tr[3], tr[6]
+                    if pd.notna(r["exit_date"]) and (xd is None or xd > r["exit_date"]):
+                        xd, xp, why = r["exit_date"], r["exit"], r["why"]
+                    out.append(dict(r, sig_date=f.index[k - 1], entry_date=f.index[k], exit_date=xd, entry=px, exit=xp, stop0=st,
+                                    R=(xp - px) / (px - st), ret=(xp / px - 1) * 100 - 2 * BT["cost_pct"], why=why, add=True))
+                    break
+        return pd.concat([df, pd.DataFrame(out)], ignore_index=True) if out else df
+
+    tech_indicators(frames, cal)
+    print("수익률 개선 후보 돌리는 중...")
+    sig0 = sig0.copy()
+    sig0["beta"] = tag(sig0, "beta")
+    sig0["mkt_s"] = tag(sig0, "mkt")
+    v2 = CV(vol_need=2.0, **kw)
+    v15 = CV(vol_need=1.5, **kw)
+    b26 = CV(min_base=26, **kw)
+    g2 = CV(max_gap=2, **kw)
+    allf = weak_out(CV(vol_need=1.5, min_base=26, max_gap=2, **kw))
+    q_eq = etf_timing(dfs, ["QQQ"], cal, 1, (1, 2, 3), (4,), bench=dfs["^GSPC"]["Close"])[0] if "QQQ" in dfs else None
+
+    rows, eqs = [], {}
+    def add(name, desc, res):
+        e_, t_ = res
+        s = e_["equity"] if isinstance(e_, pd.DataFrame) else e_
+        rows.append(dict(name=name, desc=desc, c=stats_curve(s), t=stats_trades(t_) if t_ is not None else {},
+                         a=stats_curve(s[s.index < IMPROVE_SPLIT]), b=stats_curve(s[s.index >= IMPROVE_SPLIT])))
+        eqs[name] = s
+        print(f"  {name}: 연평균 {f_(rows[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(rows[-1]['c'].get('mdd'))}% · "
+              f"앞 {f_(rows[-1]['a'].get('cagr'))}% · 뒤 {f_(rows[-1]['b'].get('cagr'))}%")
+
+    def blend(s1, s2, w=0.5):          # 매주 w : 1-w로 맞춘 조합
+        r = w * s1.pct_change() + (1 - w) * s2.reindex(s1.index, method="ffill").pct_change()
+        return (1 + r.fillna(0)).cumprod() * 100
+
+    add("지금", f"{ms0}점 이상 · 이 규칙 그대로 (볼린저 수축 가점 +{S.CFG['squeeze_pts']} 포함)", (eq0, tr0))
+    for ms in (70, 75, 80, 85):
+        if ms != ms0:
+            add(f"점수 {ms}점 이상", f"매수 점수 기준만 {ms}점으로", run(sig0, ms=ms))
+    add("돌파 거래량 2배 확인", "돌파로 산 주의 거래량이 평소 2배 미만이면 다음 주 시가에 매도", run(v2))
+    add("돌파 거래량 1.5배 확인", "같은 규칙, 기준 1.5배", run(v15))
+    add("기저 26주 미만 돌파 제외", "6개월 이상 다진 기저를 돌파할 때만 매수", run(b26))
+    add("갭 2%+ 돌파 건너뜀", "앱 요령대로 스톱 지정가를 매수가 +2%로: 시가가 그보다 위에서 시작하면 사지 않음", run(g2))
+    add("약한 셋업 제외", "30주선 이탈했던 풀백 · 52주 +60% 후반 · 헤드앤숄더 천장 뒤 · 실적 2주 앞 풀백 제외", run(weak_out(sig0)))
+    add("필터 모두", "거래량 1.5배 확인 + 기저 26주 + 갭 2% + 약한 셋업 제외", run(allf))
+    add("필터 모두 + 위험 1.5%", "위 + 1회 손절 시 계좌 1.5%", run(allf, risk=1.5))
+    add("필터 모두 + 8종목", "위 + 동시 최대 8종목 (한 종목 최대 12.5%)", run(allf, mp_=8))
+    # 베타
+    bt = sig0["beta"]
+    add("베타 1.6 이상 제외", "신호 주 52주 베타(S&P500 대비)가 1.6 이상인 종목은 안 삼", run(sig0[~(bt >= 1.6)]))
+    add("베타 0.8 미만 제외", "베타가 0.8 미만인 종목은 안 삼", run(sig0[~(bt < 0.8)]))
+    add("같은 점수면 저베타 먼저", "같은 주·같은 점수 신호가 겹치면 베타가 낮은 종목부터", run(sig0.assign(beta=bt.fillna(9)), order="beta"))
+    # 갈아타기 · 추매 · 매도 · 시장
+    def run_rot(mode):
+        return run_portfolio(sig0, frames, cal, ms0, max_pos=mp, rotate=mode, rot_min=ms0 + 5, fill=fill, max_small=msmall, caps=capmap)
+    add("약한 종목 갈아타기", f"자리가 꽉 찼을 때 {ms0 + 5}점+ 새 신호가 오면, 4주 넘게 든 종목 중 약해진 것(점수 50 미만·3단계·RS 하락·업종 3·4단계)을 팔고 교체", run_rot("weak"))
+    add("점수 차 갈아타기", f"{ms0 + 5}점+ 새 신호보다 25점 이상 낮은 보유 종목과 교체", run_rot("gap"))
+    add("10주선 추매", "+5% 수익 중 10주선에 닿으면 위험 절반만큼 추매 (손절 10주선 -5%)", run(add_ons(sig0)))
+    add("8주 뒤 본전 손절", "매수 8주 뒤 종가가 수익이면 손절가를 매수가로", run(CV(be=8, **kw)))
+    add("30주선 종가 -3% 이탈 매도", "4단계를 기다리지 않고, 금요일 종가가 30주선 -3% 아래면 그 종가에 매도", run(CV(ma_exit=3, **kw)))
+    # 유명한 기술적 기법 결합 (신호 주 금요일까지의 값으로 거르기)
+    tk = {c: tag(sig0, c) for c in TECH_COLS}
+    for lab, desc, m in tech_masks(tk):
+        add("[결합] " + lab, desc, run(sig0[m]))
+    add("[결합] 샹들리에 청산", "4단계를 기다리지 않고, 매수 후 최고 종가 - ATR(10주)×3 아래로 금요일 마감하면 매도", run(CV(chand=3, **kw)))
+    # 볼린저 수축 가점 크기 (지금 = screener CFG 값)
+    sq = tag(sig0, "sqz_on")
+    for alt in (0, 3, 5, 8):
+        if alt != S.CFG["squeeze_pts"]:
+            add("볼린저 가점 없음" if alt == 0 else f"볼린저 가점 +{alt}", f"볼린저 수축 뒤 신호 가점을 {S.CFG['squeeze_pts']}점 대신 {alt}점으로 (점수만 다시 매긴 근사치)",
+                run(sig0.assign(score=np.clip(sig0["score"] + (sq == 1) * (alt - S.CFG["squeeze_pts"]), 0, 100))))
+    add("시장 3단계면 신규 매수 보류", "나스닥·S&P 중 나쁜 쪽이 3단계인 주의 신호는 안 삼 (지금은 4단계만 보류)", run(sig0[sig0["mkt_s"] != 3]))
+    if q_eq is not None:
+        add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))
+        add("반반: 지금 + QQQ", "자금 50%는 지금 전략, 50%는 QQQ(4단계면 현금)", (blend(eqs["지금"], q_eq), None))
+        add("반반: 필터 모두 + QQQ", "자금 50%는 필터 모두, 50%는 QQQ(4단계면 현금)", (blend(eqs["필터 모두"], q_eq), None))
+    keep = ["지금", "필터 모두", "반반: 필터 모두 + QQQ", "QQQ · 4단계 때만 현금"]
+    curves = {k: eqs[k] / eqs[k].iloc[0] * 100 for k in keep if k in eqs}
+    if "QQQ" in dfs:
+        c = dfs["QQQ"]["Close"].reindex(cal, method="ffill")
+        curves["QQQ"] = c / c.iloc[0] * 100
+    sc_ = sig0[sig0["score"] >= 65]
+    beta_rows = [(f"[베타] 65점+ 신호 · 베타 {lab}", stats_trades(sc_[(sc_["beta"] >= lo) & (sc_["beta"] < hi)]))
+                 for lab, lo, hi in (("0.8 미만", -9, 0.8), ("0.8~1.2", 0.8, 1.2), ("1.2~1.6", 1.2, 1.6), ("1.6 이상", 1.6, 99))]
+    sc_t = {c: tag(sc_, c) for c in TECH_COLS}
+    for lab, _, m in tech_masks(sc_t):
+        beta_rows.append((f"[결합] 65점+ 신호 · {lab} 충족", stats_trades(sc_[m])))
+        beta_rows.append((f"[결합] 65점+ 신호 · {lab} 미충족", stats_trades(sc_[~m])))
+    return rows, curves, beta_rows
+
+
 # ---------------- 메인 ----------------
 def main(argv=None, fetch=None, universe=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2006-01-01")
-    ap.add_argument("--min-score", type=int, default=70)
+    ap.add_argument("--min-score", type=int, default=80)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--web", action="store_true", help="앱 안에 넣을 리포트 (앱으로 돌아가는 링크 포함)")
@@ -924,9 +1170,8 @@ def main(argv=None, fetch=None, universe=None):
     small_t = [t for t in frames if capmap.get(t) == "소형"]
     rk_small = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
     base_kw = dict(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13)
-    sigs = {"cur": CV(**base_kw), "close": CV(stop_mode="close", **base_kw)}
-    for x in (3, 5, 8):
-        sigs[f"e{x}"] = CV(stop_mode="close", emerg=x, **base_kw)
+    SK = {"cur": {}, "close": dict(stop_mode="close"), **{f"e{x}": dict(stop_mode="close", emerg=x) for x in (3, 5, 8)}}
+    sigs = {k: CV(**kw, **base_kw) for k, kw in SK.items()}
     sigs[""] = sigs["cur"]
     sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (신호 분석용)
     bk = sigs["cur"]
@@ -960,14 +1205,15 @@ def main(argv=None, fetch=None, universe=None):
         desc = (f"{why} · 한 종목 최대 {min(BT['max_weight'], 100 / mp_):.0f}% · 평균 보유 {e_['n'].mean():.1f}종목 · "
                 f"평균 투자 비중: 종목 {e_['stk'].mean():.0f}% + QQQ {e_['etf'].mean():.0f}%"
                 + f" · 실제 거래 중 소형주 {smt.get('n', 0)}건" + (f" (승률 {f_(smt.get('win'), 0)}% · 평균 {f_(smt.get('avgR'))}R)" if smt.get("n") else ""))
-        comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=None, loR=None))
+        comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=stats_trades(base_sig[base_sig["score"] >= 75]).get("avgR"),
+                         loR=stats_trades(base_sig[base_sig["score"] < 65]).get("avgR")))
         runs[name] = (base_sig, e_, t_)
-        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl, msmall)
+        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl, msmall, sk)
         print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 소형주 거래 {smt.get('n', 0)} {f_(smt.get('avgR'))}R")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("mar") if pd.notna(r["c"].get("mar")) else -99))["name"]   # 연평균/최대낙폭이 가장 좋은 조합
-    ver_b, smode_b, pct_b, ex_b, mp_b, fill_b, ms_b = combos[best]
+    ver_b, smode_b, pct_b, ex_b, mp_b, fill_b, ms_b, sk_b = combos[best]
     EXIT.clear(); EXIT.update(EXITS[ex_b])
     STOP.clear(); STOP.update(mode=smode_b, pct=pct_b)
     for f in frames.values():
@@ -983,6 +1229,9 @@ def main(argv=None, fetch=None, universe=None):
         cl3 = ss[~ss["dup"]]
         seg.append(dict(name=cp, n_t=int(ss["ticker"].nunique()), c=stats_curve(e3["equity"]), t=stats_trades(t3), s=stats_trades(cl3)))
         print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
+    ib = IMPROVE_BASE if IMPROVE_BASE in runs else best
+    *_, mp_i, fill_i, ms_i, sk_i = combos[ib]
+    improve, imp_curves, beta_rows = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn)
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -1092,6 +1341,7 @@ def main(argv=None, fetch=None, universe=None):
                    ("[매물] 소형주 중 -25% 이하 비율 → 신호 수만 비교", allsig["sm"] & (allsig["dd"] <= -25)), ("[매물] 대·중형 중 -25% 이하 → 신호 수만 비교", ~allsig["sm"] & (allsig["dd"] <= -25))]:
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
+    buckets.extend(beta_rows)
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
     yearly = pd.DataFrame({k: v.resample("YE").last().pct_change() * 100 for k, v in curves.items()})
     first = {k: (v.resample("YE").last().iloc[0] / v.iloc[0] - 1) * 100 for k, v in curves.items()}
@@ -1107,7 +1357,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves, seg=seg)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves, imp_base=ib)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")

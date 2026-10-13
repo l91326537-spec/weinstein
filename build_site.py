@@ -99,7 +99,8 @@ def stock_payload(r):
              res=r2(r["res"]), buyStop=r2(r["buy_stop"]), pullback=pz, stop=r2(r["stop"]),
              stopPct=r2(r["stop_pct"], 1), rs=r2(r["rs"], 1), vr=r2(r["vr"], 1), brkVr=r2(r.get("brk_vr"), 1),
              volGrade=r["volGrade"], rsGrade=r["rsGrade"], breakdown=r["breakdown"], caps=r["caps"],
-             sectorStage=r.get("sector_stage"), kind=r.get("kind") or "")
+             sectorStage=r.get("sector_stage"), kind=r.get("kind") or "",
+             mvN=int(r.get("mv_n") or 0), mvOk=bool(r.get("minervini")), sqz=bool(r.get("squeeze")))
     d.update(buy_plan(r))
     return d
 

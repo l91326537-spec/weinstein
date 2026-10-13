@@ -7,7 +7,7 @@ on:
         default: "2006-01-01"
       min_score:
         description: "buy score threshold"
-        default: "70"
+        default: "80"
 permissions:
   contents: write
   actions: write
