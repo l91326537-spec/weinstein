@@ -8,7 +8,7 @@
         → 이후 30주선·최근 8주 저점 중 높은 쪽 아래로 추적 (주중 저가가 닿으면 매도)
         → 종목이 4단계로 바뀌면 다음 주 시가에 매도
 - 비교: SPY, QQQ, 같은 종목들을 똑같이 나눠 들고 있었을 때(동일가중)
-실행: python backtest.py                (기본: 2006년부터, 점수 70 이상)
+실행: python backtest.py                (기본: 2006년부터, 점수 80 이상)
       python backtest.py --quick        (나스닥100만, 빠른 확인)
       python backtest.py --start 2010-01-01 --min-score 80
 """
@@ -961,15 +961,15 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
         return (1 + r.fillna(0)).cumprod() * 100
 
     add("지금", f"{ms0}점 이상 · 이 규칙 그대로", (eq0, tr0))
-    add("점수 75점 이상", "매수 점수 기준만 75점으로", run(sig0, ms=75))
-    add("점수 80점 이상", "매수 점수 기준만 80점으로", run(sig0, ms=80))
+    for ms in (70, 75, 80, 85):
+        if ms != ms0:
+            add(f"점수 {ms}점 이상", f"매수 점수 기준만 {ms}점으로", run(sig0, ms=ms))
     add("돌파 거래량 2배 확인", "돌파로 산 주의 거래량이 평소 2배 미만이면 다음 주 시가에 매도", run(v2))
     add("돌파 거래량 1.5배 확인", "같은 규칙, 기준 1.5배", run(v15))
     add("기저 26주 미만 돌파 제외", "6개월 이상 다진 기저를 돌파할 때만 매수", run(b26))
     add("갭 2%+ 돌파 건너뜀", "앱 요령대로 스톱 지정가를 매수가 +2%로: 시가가 그보다 위에서 시작하면 사지 않음", run(g2))
     add("약한 셋업 제외", "30주선 이탈했던 풀백 · 52주 +60% 후반 · 헤드앤숄더 천장 뒤 · 실적 2주 앞 풀백 제외", run(weak_out(sig0)))
     add("필터 모두", "거래량 1.5배 확인 + 기저 26주 + 갭 2% + 약한 셋업 제외", run(allf))
-    add("필터 모두 + 80점", "위 + 80점 이상만", run(allf, ms=80))
     add("필터 모두 + 위험 1.5%", "위 + 1회 손절 시 계좌 1.5%", run(allf, risk=1.5))
     add("필터 모두 + 8종목", "위 + 동시 최대 8종목 (한 종목 최대 12.5%)", run(allf, mp_=8))
     if q_eq is not None:
@@ -988,7 +988,7 @@ def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, ca
 def main(argv=None, fetch=None, universe=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2006-01-01")
-    ap.add_argument("--min-score", type=int, default=70)
+    ap.add_argument("--min-score", type=int, default=80)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--web", action="store_true", help="앱 안에 넣을 리포트 (앱으로 돌아가는 링크 포함)")

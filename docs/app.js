@@ -117,10 +117,12 @@ function lowWhy(td) {
   if (bd.rs != null && bd.rs <= 3) out.push(`RS ${bd.rs}: 시장보다 약함`);
   return out;
 }
+/* 매수 점수 기준: 백테스트(2006~)에서 80점 이상만 산 경우가 70점보다 앞·뒤 기간 모두 나았음 */
+const BUY_SCORE = 80;
 function ruleCheck(td) {
   const v = [];
   if (SUM && SUM.worst === 4) v.push("시장 4단계");
-  if (td.score == null || td.score < 65) v.push("점수 65 미만");
+  if (td.score == null || td.score < BUY_SCORE) v.push(`점수 ${BUY_SCORE} 미만`);
   if (td.stage !== 2) v.push("2단계 아님");
   if ([3, 4].includes(td.sectorStage)) v.push("업종 " + td.sectorStage + "단계");
   if (num(td.ext) !== null && td.ext >= 20) v.push("과열(이격 20%+)");
@@ -247,12 +249,13 @@ function candItem(c, rank) {
 /* ---------- 화면: 후보 ---------- */
 let candTab = "1→2 돌파", capTab = "대·중형";
 function viewCands(v) {
-  const tabs = ["1→2 돌파", "돌파", "풀백", "베이스 대기", "65점+"];
-  const inTab = (c, t) => t === "65점+" ? c.score >= 65 : t === "1→2 돌파" ? c.kind === "1→2 돌파" : c.signal === t;
+  const buyTab = `매수 ${BUY_SCORE}+`;
+  const tabs = [buyTab, "1→2 돌파", "돌파", "풀백", "베이스 대기", "65점+"];
+  const inTab = (c, t) => t === buyTab ? !!c.signal && c.score >= BUY_SCORE : t === "65점+" ? c.score >= 65 : t === "1→2 돌파" ? c.kind === "1→2 돌파" : c.signal === t;
   /* 소형주(러셀2000)는 백테스트 성적이 나빠 기본 목록에서 빼고, '소형(참고)'·'내 종목'에서만 보여줌 */
   const capOk = c => capTab === "대·중형" ? c.cap !== "소형" : capTab === "소형(참고)" ? c.cap === "소형" : capTab === "내 종목" ? c.mine : c.cap === capTab;
   const list = SUM.candidates.filter(c => capOk(c) && inTab(c, candTab)).sort((a, b) => b.score - a.score);
-  const desc = { "1→2 돌파": "1단계 기저(15주+)에서 막 2단계로 넘어가는 돌파 · 와인스테인의 최우선 매수 자리 (+10점)", "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선 풀백(-3~+5%) 또는 돌파선 되돌림(±3%)", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상" }[candTab];
+  const desc = { "1→2 돌파": "1단계 기저(15주+)에서 막 2단계로 넘어가는 돌파 · 와인스테인의 최우선 매수 자리 (+10점)", "돌파": "최근 3주 안에 26주 고점을 거래량과 함께 종가 돌파", "풀백": "2단계 중 30주선 풀백(-3~+5%) 또는 돌파선 되돌림(±3%)", "베이스 대기": "1단계 베이스 상단 5% 이내, RS 개선 중", "65점+": "신호와 관계없이 주봉 점수 65점 이상", [buyTab]: `돌파·풀백 신호 + 점수 ${BUY_SCORE}점 이상 · 백테스트 매수 기준` }[candTab];
   v.innerHTML = `<h1>후보</h1>
     <div class="seg" role="group">${tabs.map(t => `<button data-ct="${t}" aria-pressed="${t === candTab}">${t} ${SUM.candidates.filter(c => capOk(c) && inTab(c, t)).length}</button>`).join("")}</div>
     <div class="seg" role="group">${["대·중형", "대형", "중형", "소형(참고)", "내 종목"].map(t => `<button data-cap="${t}" aria-pressed="${t === capTab}">${t}</button>`).join("")}</div>
