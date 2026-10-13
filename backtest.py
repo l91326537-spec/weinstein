@@ -441,7 +441,10 @@ def e_pos(r):
 
 
 def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_rule="near", pb_bonus=0, small=None, caps=None, score_col="score2",
-                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None):
+                    rt_stop=False, b12=0, only12=False, mh=None, block_rebreak=0, be=None, pb_stop="mix", stop_mode="intra", emerg=None,
+                    vol_need=None, min_base=0, max_gap=None):
+    """vol_need: 돌파 매수한 주 거래량이 이 배수 미만이면 다음 주 시가 매도 · min_base: 기저가 이 주 수 미만인 돌파는 안 삼
+       max_gap: 시가가 매수 스톱 가격보다 이 % 넘게 위에서 시작하면 그 돌파는 건너뜀"""
     """mh: 잔고점 돌파 dict(stop='pct'|'low3', bonus=점수 가점, k=최근 몇 주 고점)
        block_rebreak: 돌파 매수가 손절로 끝난 뒤 이 주 수 동안 같은 종목 돌파 재매수 안 함"""
     """rt_stop: 돌파선 되돌림 풀백의 손절을 '돌파선 -3%·3주 저점 -1% 중 낮은 쪽'으로
@@ -585,11 +588,15 @@ def collect_variant(frames, start, vol_rule, entry_rule, min_score_floor=50, pb_
                 rebreak = (j - last_bk_stop) <= 13
                 if block_rebreak and (j - last_bk_stop) <= block_rebreak:
                     continue
+                if min_base and not (blen[i] >= min_base):
+                    continue
+                if max_gap is not None and o[j] > trig * (1 + max_gap / 100):
+                    continue
                 e = max(o[j], trig)
                 s0 = widen(e * (1 - pct / 100), e, i)
                 if (e - s0) / e * 100 > BT["max_stop_pct"]:
                     continue
-                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else None, be, stop_mode, False, emerg)
+                tr = _hold_from(f, j, e, s0, True, 2.0 if (entry_rule == "stopvol" or sm.get("vol2")) else vol_need, be, stop_mode, False, emerg)
                 gapk = "up" if o[j] >= trig else ("down" if o[j] <= c[i] * 0.98 else "normal")
                 last_entry = j
                 ent, ex, e, px, R, wk, why, s0 = tr
@@ -778,7 +785,8 @@ def line_svg(series, w=1000, h=320):
     return "".join(parts) + f'<div class="leg">{leg}</div>'
 
 
-def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None):
+def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly, sig, survivors_note, comp=None, best=None, exit_curves=None, seg=None,
+                 improve=None, imp_curves=None):
     e = html.escape
     css = """
     :root{--bg:#f4f6f5;--card:#fff;--fg:#17201c;--mut:#5b6862;--line:#d8dfdb;--g:#1d7a4b;--r:#b13a3a}
@@ -817,6 +825,21 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         P.append("</table></div>")
         if exit_curves:
             P.append("<div class=card style='margin-top:8px'>" + line_svg(exit_curves) + "</div>")
+    if improve:
+        P.append(f"<h2>수익률 개선 후보</h2><div class=mut style='margin-bottom:6px'><b>{e(best or '')}</b> 규칙(6종목·QQQ 채우기)에 하나씩 바꿔 본 결과. "
+                 f"필터는 이 20년 데이터의 신호 표를 보고 고른 것이라, 앞 기간(~{IMPROVE_SPLIT.year - 1})과 뒤 기간({IMPROVE_SPLIT.year}~) 모두에서 '지금'보다 나아야 믿을 만해요. "
+                 "반반 조합은 매주 50:50으로 맞춘다고 가정했고 그 리밸런싱 비용은 빠져 있어요.</div>"
+                 "<div class=tw><table><tr><th class=l>변형</th><th>연평균</th><th>최대 낙폭</th><th>연평균/최대낙폭</th><th>거래</th><th>승률</th><th>평균 R</th>"
+                 f"<th>~{IMPROVE_SPLIT.year - 1} 연평균</th><th>~{IMPROVE_SPLIT.year - 1} 낙폭</th><th>{IMPROVE_SPLIT.year}~ 연평균</th><th>{IMPROVE_SPLIT.year}~ 낙폭</th></tr>")
+        for r in improve:
+            c_, t_, a_, b_ = r["c"], r["t"], r["a"], r["b"]
+            P.append(f"<tr><td class=l><b>{e(r['name'])}</b><div class=mut style='font-size:12px;white-space:normal;min-width:220px'>{e(r['desc'])}</div></td>"
+                     f"<td>{sgn(c_.get('cagr'))}</td><td>{sgn(c_.get('mdd'))}</td><td>{f_(c_.get('mar'), 2)}</td>"
+                     f"<td>{t_.get('n', '–')}</td><td>{f_(t_.get('win'), 0, True)}</td><td>{f_(t_.get('avgR'), 2)}</td>"
+                     f"<td>{sgn(a_.get('cagr'))}</td><td>{sgn(a_.get('mdd'))}</td><td>{sgn(b_.get('cagr'))}</td><td>{sgn(b_.get('mdd'))}</td></tr>")
+        P.append("</table></div>")
+        if imp_curves:
+            P.append("<div class=card style='margin-top:8px'>" + line_svg(imp_curves) + "</div>")
     if seg:
         P.append(f"<h2>대형 · 중형 · 소형 비교</h2><div class=mut style='margin-bottom:6px'>{e(best or '')} 규칙으로 크기별 종목만 따로 돌린 결과. "
                  "대형=S&P500·나스닥100, 중형=S&P400, 소형=러셀2000. 소형주일수록 생존 편향이 커서 실제보다 좋게 나오는 점을 감안하세요.</div>"
@@ -884,6 +907,82 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
         fh.write("".join(P))
 
 
+# ---------------- 수익률 개선 후보 ----------------
+IMPROVE_SPLIT = pd.Timestamp("2016-01-01")   # 앞·뒤 기간을 나눠 필터가 두 기간 모두에서 통하는지 확인
+
+
+def improve_study(frames, cal, dfs, args, best_run, CV, kw, mp, fill, msmall, capmap, near_earn):
+    """지금 최적 규칙(best_run)에서 하나씩 바꿔 본 포트폴리오 결과. 반환: (표 행 목록, 곡선 dict)"""
+    sig0, eq0, tr0 = best_run
+    ms0 = args.min_score
+
+    def weak_out(df):
+        """신호 주(풀백은 매수 주)까지 알 수 있는 정보로 약한 셋업 빼기:
+           풀백인데 최근 13주 안 30주선 -3% 이탈 · 30주선이 52주 최저보다 +60% 이상(후반) · 헤드앤숄더 천장 뒤 · 2주 안 실적 발표를 앞둔 풀백"""
+        if df.empty:
+            return df
+        g = lambda col: np.array([frames[t].at[d, col] for t, d in zip(df["ticker"], df["sig_date"])], float)
+        mr, rise, hst = g("min_rel13"), g("ma_rise52"), g("hs_top")
+        ea = np.array([near_earn(t, d) for t, d in zip(df["ticker"], df["entry_date"])], float)
+        pb = (df["signal"] == "풀백").values
+        bad = (pb & (mr < 0.97)) | (rise >= S.CFG["late_rise"]) | (hst > 0) | (pb & (ea == 1))
+        return df[~bad]
+
+    def run(sg, ms=None, risk=None, mp_=None):
+        old = BT["risk_pct"]
+        if risk:
+            BT["risk_pct"] = risk
+        try:
+            return run_portfolio(sg, frames, cal, ms or ms0, max_pos=mp_ or mp, fill=fill, max_small=msmall, caps=capmap)
+        finally:
+            BT["risk_pct"] = old
+
+    print("수익률 개선 후보 돌리는 중...")
+    v2 = CV(vol_need=2.0, **kw)
+    v15 = CV(vol_need=1.5, **kw)
+    b26 = CV(min_base=26, **kw)
+    g3 = CV(max_gap=3, **kw)
+    allf = weak_out(CV(vol_need=1.5, min_base=26, max_gap=3, **kw))
+    q_eq = etf_timing(dfs, ["QQQ"], cal, 1, (1, 2, 3), (4,), bench=dfs["^GSPC"]["Close"])[0] if "QQQ" in dfs else None
+
+    rows, eqs = [], {}
+    def add(name, desc, res):
+        e_, t_ = res
+        s = e_["equity"] if isinstance(e_, pd.DataFrame) else e_
+        rows.append(dict(name=name, desc=desc, c=stats_curve(s), t=stats_trades(t_) if t_ is not None else {},
+                         a=stats_curve(s[s.index < IMPROVE_SPLIT]), b=stats_curve(s[s.index >= IMPROVE_SPLIT])))
+        eqs[name] = s
+        print(f"  {name}: 연평균 {f_(rows[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(rows[-1]['c'].get('mdd'))}% · "
+              f"앞 {f_(rows[-1]['a'].get('cagr'))}% · 뒤 {f_(rows[-1]['b'].get('cagr'))}%")
+
+    def blend(s1, s2, w=0.5):          # 매주 w : 1-w로 맞춘 조합
+        r = w * s1.pct_change() + (1 - w) * s2.reindex(s1.index, method="ffill").pct_change()
+        return (1 + r.fillna(0)).cumprod() * 100
+
+    add("지금 ★", f"{ms0}점 이상 · 위의 ★ 규칙 그대로", (eq0, tr0))
+    add("점수 75점 이상", "매수 점수 기준만 75점으로", run(sig0, ms=75))
+    add("점수 80점 이상", "매수 점수 기준만 80점으로", run(sig0, ms=80))
+    add("돌파 거래량 2배 확인", "돌파로 산 주의 거래량이 평소 2배 미만이면 다음 주 시가에 매도", run(v2))
+    add("돌파 거래량 1.5배 확인", "같은 규칙, 기준 1.5배", run(v15))
+    add("기저 26주 미만 돌파 제외", "6개월 이상 다진 기저를 돌파할 때만 매수", run(b26))
+    add("갭 3%+ 돌파 건너뜀", "월요일 시가가 매수 스톱 가격보다 3% 넘게 위에서 시작하면 사지 않음", run(g3))
+    add("약한 셋업 제외", "30주선 이탈했던 풀백 · 52주 +60% 후반 · 헤드앤숄더 천장 뒤 · 실적 2주 앞 풀백 제외", run(weak_out(sig0)))
+    add("필터 모두", "거래량 1.5배 확인 + 기저 26주 + 갭 3% + 약한 셋업 제외", run(allf))
+    add("필터 모두 + 80점", "위 + 80점 이상만", run(allf, ms=80))
+    add("필터 모두 + 위험 1.5%", "위 + 1회 손절 시 계좌 1.5%", run(allf, risk=1.5))
+    add("필터 모두 + 8종목", "위 + 동시 최대 8종목 (한 종목 최대 12.5%)", run(allf, mp_=8))
+    if q_eq is not None:
+        add("QQQ · 4단계 때만 현금", "비교용: QQQ를 들고 시장 4단계 때만 현금", (q_eq, None))
+        add("반반: 지금 ★ + QQQ", "자금 50%는 지금 전략, 50%는 QQQ(4단계면 현금)", (blend(eqs["지금 ★"], q_eq), None))
+        add("반반: 필터 모두 + QQQ", "자금 50%는 필터 모두, 50%는 QQQ(4단계면 현금)", (blend(eqs["필터 모두"], q_eq), None))
+    keep = ["지금 ★", "필터 모두", "반반: 필터 모두 + QQQ", "QQQ · 4단계 때만 현금"]
+    curves = {k: eqs[k] / eqs[k].iloc[0] * 100 for k in keep if k in eqs}
+    if "QQQ" in dfs:
+        c = dfs["QQQ"]["Close"].reindex(cal, method="ffill")
+        curves["QQQ"] = c / c.iloc[0] * 100
+    return rows, curves
+
+
 # ---------------- 메인 ----------------
 def main(argv=None, fetch=None, universe=None):
     ap = argparse.ArgumentParser()
@@ -924,9 +1023,8 @@ def main(argv=None, fetch=None, universe=None):
     small_t = [t for t in frames if capmap.get(t) == "소형"]
     rk_small = pd.concat({t: frames[t]["dollar_vol"] for t in small_t}, axis=1).rank(axis=1, ascending=False) if small_t else pd.DataFrame()
     base_kw = dict(small=OUT, score_col="score2TPt", b12=10, block_rebreak=13)
-    sigs = {"cur": CV(**base_kw), "close": CV(stop_mode="close", **base_kw)}
-    for x in (3, 5, 8):
-        sigs[f"e{x}"] = CV(stop_mode="close", emerg=x, **base_kw)
+    SK = {"cur": {}, "close": dict(stop_mode="close"), **{f"e{x}": dict(stop_mode="close", emerg=x) for x in (3, 5, 8)}}
+    sigs = {k: CV(**kw, **base_kw) for k, kw in SK.items()}
     sigs[""] = sigs["cur"]
     sig_inc = CV(score_col="score2TPt")          # 소형주 포함 (신호 분석용)
     bk = sigs["cur"]
@@ -960,14 +1058,15 @@ def main(argv=None, fetch=None, universe=None):
         desc = (f"{why} · 한 종목 최대 {min(BT['max_weight'], 100 / mp_):.0f}% · 평균 보유 {e_['n'].mean():.1f}종목 · "
                 f"평균 투자 비중: 종목 {e_['stk'].mean():.0f}% + QQQ {e_['etf'].mean():.0f}%"
                 + f" · 실제 거래 중 소형주 {smt.get('n', 0)}건" + (f" (승률 {f_(smt.get('win'), 0)}% · 평균 {f_(smt.get('avgR'))}R)" if smt.get("n") else ""))
-        comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=None, loR=None))
+        comp.append(dict(name=name, desc=desc, c=cs, t=ts, hiR=stats_trades(base_sig[base_sig["score"] >= 75]).get("avgR"),
+                         loR=stats_trades(base_sig[base_sig["score"] < 65]).get("avgR")))
         runs[name] = (base_sig, e_, t_)
-        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl, msmall)
+        combos[name] = (2, "entry", S.CFG["breakout_stop_pct"], "E 4단계까지 보유", mp_, fl, msmall, sk)
         print(f"  {name}: 연평균 {f_(cs.get('cagr'))}% · 최대낙폭 {f_(cs.get('mdd'))}% · 소형주 거래 {smt.get('n', 0)} {f_(smt.get('avgR'))}R")
     if not runs:
         sys.exit("기간 안에 신호가 하나도 없습니다. --start 날짜나 점수 기준을 확인하세요.")
     best = max(comp, key=lambda r: (r["c"].get("mar") if pd.notna(r["c"].get("mar")) else -99))["name"]   # 연평균/최대낙폭이 가장 좋은 조합
-    ver_b, smode_b, pct_b, ex_b, mp_b, fill_b, ms_b = combos[best]
+    ver_b, smode_b, pct_b, ex_b, mp_b, fill_b, ms_b, sk_b = combos[best]
     EXIT.clear(); EXIT.update(EXITS[ex_b])
     STOP.clear(); STOP.update(mode=smode_b, pct=pct_b)
     for f in frames.values():
@@ -983,6 +1082,7 @@ def main(argv=None, fetch=None, universe=None):
         cl3 = ss[~ss["dup"]]
         seg.append(dict(name=cp, n_t=int(ss["ticker"].nunique()), c=stats_curve(e3["equity"]), t=stats_trades(t3), s=stats_trades(cl3)))
         print(f"  {cp}: 연평균 {f_(seg[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(seg[-1]['c'].get('mdd'))}%")
+    improve, imp_curves = improve_study(frames, cal, dfs, args, runs[best], CV, dict(SK[sk_b], **base_kw), mp_b, fill_b, ms_b, capmap, near_earn)
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -1107,7 +1207,7 @@ def main(argv=None, fetch=None, universe=None):
     if "SPY" in curves:
         exit_curves["SPY"] = curves["SPY"]
     write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, yearly.round(1), sig, note,
-                 comp=comp, best=best, exit_curves=exit_curves, seg=seg)
+                 comp=comp, best=best, exit_curves=exit_curves, seg=seg, improve=improve, imp_curves=imp_curves)
     sig.to_csv(os.path.join(S.OUT, f"backtest_signals_{day}.csv"), index=False, encoding="utf-8-sig")
     if len(trades):
         trades.to_csv(os.path.join(S.OUT, f"backtest_trades_{day}.csv"), index=False, encoding="utf-8-sig")
