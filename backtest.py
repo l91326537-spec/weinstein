@@ -370,6 +370,46 @@ def ext_study(frames, start, capmap, score_col="score2TPt", min_sc=60):
     return res
 
 
+def etf_timing(dfs, tickers, cal, maxn=1, enter=(2,), exit_=(4,), rank="rs", bench=None):
+    """ETF를 와인스테인식으로: 지난주 단계가 enter면 이번 주 시가에 매수(빈자리·RS 순), exit면 매도. 같은 비중"""
+    cost = BT["cost_pct"] / 100
+    info = {}
+    for t in tickers:
+        if t not in dfs:
+            continue
+        f = S.indicators(dfs[t])
+        st = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+        rs = S.mansfield_series(f["close"], bench) if bench is not None else pd.Series(0.0, index=f.index)
+        info[t] = dict(o=f["open"], c=f["close"], st=st, rs=rs)
+    cash, pos = 100.0, {}
+    curve, trades, wk_in = [], 0, 0
+    for d in cal:
+        dp = d - pd.Timedelta(days=1)
+        prev = {t: (v["st"].asof(dp), v["rs"].asof(dp)) for t, v in info.items()}
+        # 매도
+        for t in list(pos):
+            if prev[t][0] in exit_:
+                px = info[t]["o"].asof(d)
+                cash += pos.pop(t) * px * (1 - cost); trades += 1
+        # 매수
+        eq = cash + sum(n * info[t]["c"].asof(d) for t, n in pos.items() if pd.notna(info[t]["c"].asof(d)))
+        cands = [t for t in info if t not in pos and prev[t][0] in enter and pd.notna(info[t]["o"].reindex([d]).iloc[0])]
+        cands.sort(key=lambda t: -(prev[t][1] if pd.notna(prev[t][1]) else -99))
+        for t in cands:
+            if len(pos) >= maxn:
+                break
+            px = info[t]["o"].reindex([d]).iloc[0]
+            val = min(eq / maxn, cash / (1 + cost))
+            if val <= eq * 0.01:
+                break
+            pos[t] = val / px; cash -= val * (1 + cost); trades += 1
+        mv = sum(n * info[t]["c"].asof(d) for t, n in pos.items())
+        curve.append((d, cash + mv))
+        wk_in += 1 if pos else 0
+    e = pd.Series([x[1] for x in curve], index=[x[0] for x in curve])
+    return e, trades, wk_in / max(1, len(cal)) * 100
+
+
 def fetch_earnings(tickers):
     """야후에서 과거 실적 발표 날짜 (종목당 최대 60개 ≈ 15년). 실패한 종목은 빠짐"""
     import concurrent.futures as cf
@@ -857,7 +897,7 @@ def main(argv=None, fetch=None, universe=None):
     uni = universe or S.load_universe(args.quick)
     uni = {k: v for k, v in uni.items() if v.get("bench") == "us"}
     years = (pd.Timestamp.today() - start).days / 365.25 + 3      # 지표 계산용 3년 더
-    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.MARKET) + ["SPY", "QQQ"]
+    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ"]
     print(f"{len(need)}개 종목의 약 {years:.0f}년치 주봉을 받습니다 (처음엔 5~15분 걸릴 수 있어요)")
     dfs = (fetch or (lambda n: S.fetch_weekly(n, years=years)))(need)
     if "^GSPC" not in dfs:
@@ -996,6 +1036,24 @@ def main(argv=None, fetch=None, universe=None):
         buckets.append((lab, dict(n=len(a), win=(a[:, 0] > 0).mean() * 100, avgR=a[:, 1].mean(), medR=np.median(a[:, 1]),
                                   avgW=np.nan, avgL=np.nan, pf=np.nan, big=(a[:, 1] >= 3).mean() * 100, weeks=np.nan, ret=a[:, 0].mean())))
         print(f"  {lab}: {len(a)}개 · 평균 {a[:, 0].mean():.1f}% · {a[:, 1].mean():.2f}R")
+    # ETF 와인스테인식 비교 (곡선 통계를 표에 넣음: 승률 칸=투자 기간 비율, 평균 R 칸=연평균, 수익률 칸=최대 낙폭)
+    bench_s = dfs["^GSPC"]["Close"]
+    secs = list(S.SECTOR_ETF.values())
+    inds = secs + list(S.INDUSTRY_ETF)
+    etf_rows = [("QQQ 그냥 보유", ["QQQ"], 1, (1, 2, 3, 4), ()), ("QQQ · 4단계 때만 현금", ["QQQ"], 1, (1, 2, 3), (4,)),
+                ("QQQ · 2단계일 때만 보유", ["QQQ"], 1, (2,), (1, 3, 4)),
+                ("SPY(VOO) 그냥 보유", ["SPY"], 1, (1, 2, 3, 4), ()), ("SPY(VOO) · 4단계 때만 현금", ["SPY"], 1, (1, 2, 3), (4,)),
+                ("SPY(VOO) · 2단계일 때만 보유", ["SPY"], 1, (2,), (1, 3, 4)),
+                ("섹터 ETF 11개 · 2단계 RS 상위 3개 · 4단계 매도", secs, 3, (2,), (4,)),
+                ("섹터 ETF 11개 · 2단계 RS 상위 3개 · 3·4단계 매도", secs, 3, (2,), (3, 4)),
+                ("섹터+산업 ETF · 2단계 RS 상위 5개 · 4단계 매도", inds, 5, (2,), (4,)),
+                ("섹터+산업 ETF · 2단계 RS 상위 5개 · 3·4단계 매도", inds, 5, (2,), (3, 4))]
+    for lab, tk, n, en, ex_ in etf_rows:
+        e_, ntr, pin = etf_timing(dfs, tk, cal, n, en, ex_, bench=bench_s)
+        cst = stats_curve(e_)
+        buckets.append(("[ETF] " + lab, dict(n=ntr, win=pin, avgR=cst.get("cagr", np.nan), medR=np.nan, avgW=np.nan, avgL=np.nan, pf=np.nan,
+                                             big=np.nan, weeks=np.nan, ret=cst.get("mdd", np.nan))))
+        print(f"  [ETF] {lab}: 연평균 {f_(cst.get('cagr'))}% · 최대낙폭 {f_(cst.get('mdd'))}% · 투자 {pin:.0f}%")
     fill = np.mean(es["Cfill"]) * 100 if es["Cfill"] else 0
     es_row("[진입] 돌파 100%", es["A"])
     es_row("[진입] 돌파 50% + 되돌림 50% (못 사면 반은 현금)", es["B"])
