@@ -77,7 +77,7 @@ h1{font-size:20px;margin:0}h2{font-size:16px;margin:0}h3{font-size:13px;margin:0
 .brow .v{text-align:right;font-family:var(--mono);color:var(--muted)}.brow .v b{color:var(--fg)}
 .seg9{display:grid;grid-template-columns:repeat(9,1fr);gap:2px}.seg9 i{height:8px;border-radius:2px;background:var(--sunk)}
 /* 차트 */
-.chartbox{position:relative;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.chartbox{position:relative;touch-action:pan-y;user-select:none;-webkit-user-select:none}.zoombar{gap:6px;flex-wrap:nowrap}.zoombar .btn{min-width:40px;justify-content:center}
 .chartbox svg{display:block;width:100%}
 .chartinfo{font-size:11px;font-family:var(--mono);color:var(--muted);min-height:1.4em;display:flex;gap:10px;flex-wrap:wrap}
 .chartinfo b{color:var(--fg)}

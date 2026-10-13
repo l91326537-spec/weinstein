@@ -131,8 +131,16 @@ function ruleCheck(td) {
 }
 
 /* ---------- 차트 (SVG) ---------- */
-function drawChart(box, td, weeks) {
-  const w = td.w.slice(-weeks), n = w.length;
+/* 보이는 구간: n주, end = 마지막 주 다음 인덱스 (null = 최신까지). 확대·이동은 이 값만 바꾸고 다시 그림 */
+const CHART_MIN = 12;
+function chartWin(td, view) {
+  const total = td.w.length, n = Math.max(Math.min(CHART_MIN, total), Math.min(total, Math.round(view.n)));
+  const end = Math.max(n, Math.min(total, view.end == null ? total : Math.round(view.end)));
+  return { n, end, start: end - n, total };
+}
+function drawChart(box, td, view) {
+  const cw = chartWin(td, view);
+  const w = td.w.slice(cw.start, cw.end), n = w.length;
   const W_ = Math.max(300, box.clientWidth), H = 300, RH = 86, pr = 48, pt = 8;
   const plotW = W_ - pr - 2, priceH = H - 24, volH = 54;
   let lo = Infinity, hi = -Infinity, vmax = 0, rlo = 0, rhi = 0;
@@ -194,10 +202,54 @@ function drawChart(box, td, weeks) {
     const ch = i > 0 ? (r[W.c] / w[i - 1][W.c] - 1) * 100 : null;
     info.innerHTML = `<span>${r[W.d]}</span><span>종가 <b>${fmt(r[W.c])}</b> ${ch === null ? "" : sgn(ch)}</span><span>30주선 <b>${fmt(r[W.ma])}</b></span><span>RS <b>${fmt(r[W.rs], 1)}</b></span><span>거래량 <b>${(r[W.v] / 1e6).toFixed(1)}M</b></span>`;
   };
-  const svg = $("svg", box);
-  const pick = e => { const b = svg.getBoundingClientRect(); const px = (e.clientX - b.left) * W_ / b.width; show(Math.max(0, Math.min(n - 1, Math.floor((px - 2) / (plotW / n))))); };
-  svg.addEventListener("pointermove", pick); svg.addEventListener("pointerdown", pick);
+  box._geo = { W_, plotW, n, show };
   show(n - 1);
+}
+/* 확대·이동: 두 손가락 벌리기/오므리기(+옆으로 끌면 이동), 마우스 휠, 버튼. 한 손가락은 지금처럼 그 주 값 보기 */
+function bindChartZoom(box, td, view, redraw) {
+  const pts = new Map();
+  let pinch = null, raf = 0;
+  const frac = clientX => { const b = box.getBoundingClientRect(), g = box._geo; return Math.max(0, Math.min(1, ((clientX - b.left) * g.W_ / b.width - 2) / g.plotW)); };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; redraw(); }); };
+  const setWin = (n, anchorIdx, anchorFrac) => {
+    const total = td.w.length;
+    n = Math.max(Math.min(CHART_MIN, total), Math.min(total, n));
+    let end = anchorIdx - anchorFrac * n + n;
+    end = Math.max(n, Math.min(total, end));
+    view.n = n; view.end = end >= total - 0.5 ? null : end;
+  };
+  const pick = e => { const g = box._geo; if (g) g.show(Math.max(0, Math.min(g.n - 1, Math.floor(frac(e.clientX) * g.n)))); };
+  box.addEventListener("pointerdown", e => {
+    pts.set(e.pointerId, e.clientX);
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()], cw = chartWin(td, view), mid = (a + b) / 2;
+      pinch = { d0: Math.max(20, Math.abs(a - b)), n0: cw.n, anchor: cw.start + frac(mid) * cw.n };
+    } else pick(e);
+  });
+  box.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) { if (e.pointerType === "mouse") pick(e); return; }
+    pts.set(e.pointerId, e.clientX);
+    if (pinch && pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      setWin(pinch.n0 * pinch.d0 / Math.max(20, Math.abs(a - b)), pinch.anchor, frac((a + b) / 2));
+      schedule();
+    } else if (!pinch) pick(e);
+  });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  box.addEventListener("pointerup", up); box.addEventListener("pointercancel", up); box.addEventListener("pointerleave", e => { if (e.pointerType === "mouse") up(e); });
+  box.addEventListener("wheel", e => {
+    e.preventDefault();
+    const cw = chartWin(td, view), f = frac(e.clientX);
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) setWin(cw.n, cw.start + f * cw.n + e.deltaX / 40, f);      // 가로 스크롤 = 이동
+    else setWin(cw.n * (e.deltaY > 0 ? 1.15 : 1 / 1.15), cw.start + f * cw.n, f);
+    schedule();
+  }, { passive: false });
+}
+function chartStep(td, view, act) {
+  const cw = chartWin(td, view), total = td.w.length;
+  if (act === "in" || act === "out") { const n = Math.round(cw.n * (act === "in" ? 0.67 : 1.5)); view.n = Math.max(Math.min(CHART_MIN, total), Math.min(total, n)); if (view.end != null) view.end = Math.min(total, Math.max(view.n, cw.end)); }
+  else if (act === "left" || act === "right") { const step = Math.max(1, Math.round(cw.n / 3)), end = cw.end + (act === "left" ? -step : step); view.end = end >= total ? null : Math.max(cw.n, end); }
+  else if (act === "now") view.end = null;
 }
 
 /* ---------- 화면: 홈 ---------- */
@@ -316,8 +368,9 @@ async function viewStock(v, t) {
     </div>
     <div class="row"><b class="mono" style="font-size:22px">${fmt(last[W.c])}</b>${sgn(prev ? (last[W.c] / prev[W.c] - 1) * 100 : null)}<span class="muted" style="font-size:12px">주간 · ${last[W.d]} 주</span></div>
     <div class="seg" role="group">${[[52, "1년"], [104, "2년"], [156, "3년"]].map(([n, l]) => `<button data-wk="${n}" aria-pressed="${n === chartWeeks}">${l}</button>`).join("")}</div>
+    <div class="row zoombar" role="group" aria-label="차트 확대·이동"><button class="btn sm" data-z="left" aria-label="과거로">◀</button><button class="btn sm" data-z="out" aria-label="축소">－</button><button class="btn sm" data-z="in" aria-label="확대">＋</button><button class="btn sm" data-z="right" aria-label="최근 쪽으로">▶</button><button class="btn sm" data-z="now">최근</button></div>
     <div><div class="chartinfo"></div><div class="chartbox" id="chart"></div></div>
-    <p class="note"><span style="color:var(--ma)">━</span> 30주선 · 회색 막대 거래량 · 차트를 누르거나 끌면 그 주 값이 위에 나와요</p>
+    <p class="note"><span style="color:var(--ma)">━</span> 30주선 · 회색 막대 거래량 · 차트를 누르거나 끌면 그 주 값이 위에 나와요 · 두 손가락으로 벌리면 확대, 옆으로 끌면 이동 (PC는 마우스 휠)</p>
   </section>
   ${secMembers(t)}
   ${td.score != null ? `<section class="card"><h3>매수 계획</h3>
@@ -348,10 +401,13 @@ async function viewStock(v, t) {
   </section>` : `<section class="card"><p class="note">업종 ETF·지수는 단계만 표시합니다. 30주선 이격 ${pct(td.ext)}</p></section>`}`;
   bindSearch(v);
   const box = $("#chart", v);
-  const draw = () => drawChart(box, td, chartWeeks);
+  const view = { n: chartWeeks, end: null };
+  const draw = () => { drawChart(box, td, view); v.querySelectorAll("[data-wk]").forEach(x => x.setAttribute("aria-pressed", view.end == null && Math.round(view.n) === +x.dataset.wk)); };
   draw();
+  bindChartZoom(box, td, view, draw);
+  v.querySelectorAll("[data-z]").forEach(b => b.onclick = () => { chartStep(td, view, b.dataset.z); draw(); });
   const ssb = $("#secsmall", v); if (ssb) ssb.onclick = () => { secCapAll = !secCapAll; route(); };
-  v.querySelectorAll("[data-wk]").forEach(b => b.onclick = () => { chartWeeks = +b.dataset.wk; v.querySelectorAll("[data-wk]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
+  v.querySelectorAll("[data-wk]").forEach(b => b.onclick = () => { chartWeeks = +b.dataset.wk; view.n = chartWeeks; view.end = null; draw(); });
   window.onresize = () => { if (document.body.contains(box)) draw(); };
   const bb = $("#buyBtn", v); if (bb) bb.onclick = () => buySheet(td, qty, viol);
 }
