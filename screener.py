@@ -76,6 +76,8 @@ INDUSTRY_ETF = {  # 세부 업종 ETF (업종 단계 표에 표시)
     "MOO": "농업", "KBE": "은행", "MSOS": "대마초", "FXI": "중국", "COPX": "구리·원자재", "BKCH": "크립토",
     "IHF": "헬스케어 서비스·보험", "ITB": "주택건설(건설사)", "PEJ": "레저·여행", "PPH": "제약", "SLX": "철강",
     "QTUM": "양자컴퓨팅", "REMX": "희토류", "EATZ": "외식", "BDRY": "해운",
+    # 테마 묶음용 (시총 2조원+ 종목을 업종별로 묶을 때 쓰는 ETF)
+    "KIE": "보험", "XOP": "석유·가스", "PBJ": "식품·음료", "GRID": "전력망·전기장비", "UFO": "우주", "CARZ": "자동차",
 }
 # 내 업종 이름 → 그 업종을 대표하는 ETF (my_tickers.txt의 업종명으로 업종 단계를 계산)
 MYSECTOR_ETF = {
@@ -87,6 +89,114 @@ MYSECTOR_ETF = {
     "양자컴퓨팅": "QTUM", "해운·탱커": "BDRY", "원자력·우라늄": "URA", "교육": "XLY",
     "생명과학 도구": "XLV", "헬스케어 테크": "XLV", "화장품·생활용품": "XLP", "중국": "FXI", "중국 교육": "FXI",
 }
+# ---------------- 테마(업종) 묶음 ----------------
+# 토스처럼 업종·테마별로 종목을 묶어 보여 주기 위한 것. 점수 계산의 업종 단계는 그대로 GICS 섹터(또는 my_tickers 업종)를 씁니다.
+THEME_MIN_MCAP = 1.5e9      # 시총 약 2조원 이상만 테마에 넣음 (시총을 모르는 종목은 넣음)
+# 나스닥 업종명(industry)에 이 단어가 들어 있으면 → (테마, 대표 ETF). 위에서부터 먼저 맞는 것 하나
+THEME_RULES = [
+    (("semiconductor",), "반도체", "SMH"),
+    (("computer software", "edp services"), "소프트웨어", "IGV"),
+    (("internet and information", "catalog/specialty distribution"), "인터넷", "FDN"),
+    (("computer manufacturing", "computer peripheral", "electronic components", "computer communications"), "IT 하드웨어", None),
+    (("telecommunications equipment", "radio and television broadcasting and communications equipment"), "통신장비", None),
+    (("biotechnology",), "바이오", "IBB"),
+    (("major pharmaceuticals", "pharmaceutical"), "제약", "PPH"),
+    (("medical/dental", "medical specialities", "medical electronics", "ophthalmic", "medical/surgical"), "의료기기", "IHI"),
+    (("hospital", "nursing", "health insurance", "medical care"), "헬스케어 서비스·보험", "IHF"),
+    (("savings institutions",), "지역은행", "KRE"),
+    (("major banks", "commercial banks"), "은행", "KBE"),
+    (("investment bankers", "investment managers", "finance/investors services"), "증권·자산운용", "IAI"),
+    (("insurers", "insurance"), "보험", "KIE"),
+    (("real estate investment trusts",), "리츠·부동산", None),
+    (("oilfield services",), "석유서비스", "OIH"),
+    (("oil & gas production", "integrated oil", "oil refining", "oil/gas transmission"), "석유·가스", "XOP"),
+    (("electric utilities", "power generation", "natural gas distribution", "water supply"), "유틸리티", None),
+    (("aerospace", "military/government"), "항공우주·방산", "ITA"),
+    (("marine transportation",), "해운", "BDRY"),
+    (("air freight", "trucking", "railroads", "transportation services"), "운송·물류", "IYT"),
+    (("restaurants",), "외식", "EATZ"),
+    (("hotels/resorts", "amusement", "recreational"), "레저·여행", "PEJ"),
+    (("homebuilding",), "주택건설(건설사)", "ITB"),
+    (("building products", "building materials", "engineering & construction"), "건설·건자재", "PAVE"),
+    (("auto manufacturing", "auto parts"), "자동차", "CARZ"),
+    (("clothing", "department/specialty retail", "retail", "shoe"), "소매", "XRT"),
+    (("precious metals",), "금광", "GDX"),
+    (("steel/iron ore",), "철강", "SLX"),
+    (("metal mining", "mining & quarrying", "coal mining"), "금속·광업", "XME"),
+    (("chemicals",), "화학", None),
+    (("packaged foods", "beverages", "meat/poultry", "food chains", "specialty foods"), "식품·음료", "PBJ"),
+    (("electrical products", "industrial machinery", "power generation equipment"), "전력망·전기장비", "GRID"),
+    (("movies/entertainment", "cable & other pay television", "broadcasting", "newspapers", "publishing"), "미디어·엔터", None),
+    (("telecommunications",), "통신서비스", None),
+]
+# 여러 업종에 걸친 테마 (종목이 원래 업종과 함께 여기에도 들어감)
+THEME_LIST = {
+    "클라우드": ("SKYY", "AMZN MSFT GOOGL ORCL IBM CRM NOW SNOW NET DDOG MDB ZS CRWD OKTA TWLO HUBS WDAY TEAM SHOP ESTC CFLT GTLB "
+                     "DOCN FSLY AKAM NTNX PATH BOX DBX ZM VEEV ADBE INTU CRWV NBIS DOCU PAYC PCTY BILL TOST APPF FRSH ASAN"),
+    "사이버보안": ("CIBR", "CRWD PANW FTNT ZS OKTA NET CHKP S TENB RPD QLYS VRNS GEN AKAM CYBR"),
+    "양자컴퓨팅": ("QTUM", "IONQ RGTI QBTS QUBT"),
+    "원자력·우라늄": ("URA", "CCJ OKLO SMR CEG VST BWXT LEU NNE TLN"),
+    "우주": ("UFO", "RKLB ASTS LUNR PL RDW IRDM VSAT SATS"),
+    "핀테크": ("ARKF", "PYPL XYZ COIN HOOD SOFI AFRM UPST NU TOST FOUR"),
+    "로봇·자율주행": ("BOTZ", "TSLA ISRG SYM TER OUST"),
+    "크립토": ("BKCH", "COIN MSTR MARA RIOT CLSK HUT CORZ IREN CIFR HOOD"),
+    "태양광": ("TAN", "FSLR ENPH SEDG RUN NXT ARRY CSIQ"),
+    "중국 인터넷": ("KWEB", "BABA PDD JD BIDU NTES TCOM BILI TME VIPS BEKE WB"),
+}
+
+
+def sector_label(info):
+    """앱에 보이는 업종 이름: my_tickers 업종 > 테마(나스닥 업종) > GICS 섹터"""
+    th = info.get("themes") or []
+    return info.get("mysector") or (th[0][0] if th else None) or SECTOR_KO.get(info.get("sector") or "", None)
+
+
+def theme_of_industry(ind):
+    s = (ind or "").lower()
+    for keys, name, etf in THEME_RULES:
+        if any(k in s for k in keys):
+            return name, etf
+    return None, None
+
+
+def themes_for(tk, industry=None, mcap=None):
+    """종목 → [(테마, ETF 또는 None), ...]  첫 번째가 대표 업종"""
+    if mcap is not None and not pd.isna(mcap) and mcap < THEME_MIN_MCAP:
+        return []
+    out = []
+    nm, etf = theme_of_industry(industry)
+    if nm == "바이오" and "pharmaceutical" in (industry or "").lower() and mcap is not None and not pd.isna(mcap) and mcap >= 3e10:
+        nm, etf = "제약", "PPH"          # 나스닥은 대형 제약사도 'Biotechnology: Pharmaceutical Preparations'로 분류
+    if nm:
+        out.append((nm, etf))
+    for name, (etf, tks) in THEME_LIST.items():
+        if tk in tks.split() and all(name != o[0] for o in out):
+            out.append((name, etf))
+    return out
+
+
+def _nasdaq_screener():
+    """나스닥 스크리너: 미국 상장 전 종목의 시총·업종 (한 번에 받음)"""
+    import requests
+    r = requests.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true",
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"}, timeout=60)
+    r.raise_for_status()
+    rows = r.json()["data"]["rows"]
+    out = []
+    for x in rows:
+        tk = str(x.get("symbol") or "").strip().replace("/", "-").replace(".", "-")
+        if not tk or "^" in tk:
+            continue
+        try:
+            mc = float(str(x.get("marketCap") or "").replace(",", "") or "nan")
+        except ValueError:
+            mc = float("nan")
+        out.append((tk, mc, str(x.get("industry") or "").strip(), str(x.get("sector") or "").strip()))
+    if len(out) < 3000:
+        raise ValueError(f"종목 수가 너무 적음 ({len(out)})")
+    return out
+
+
 CAP_ORDER = {"대형": 0, "중형": 1, "소형": 2}
 SECTOR_FIX = {"ASML": "Information Technology", "MSTR": "Information Technology", "ALNY": "Health Care",
               "MELI": "Consumer Discretionary", "SHOP": "Information Technology", "CCEP": "Consumer Staples",
@@ -263,6 +373,13 @@ def refresh_universe():
         except Exception as e:
             log.append(f"{key}: 받지 못함 ({type(e).__name__}: {e}) — 기존 목록 유지")
         print(log[-1])
+    try:
+        rows = _nasdaq_screener()
+        pd.DataFrame(rows, columns=["ticker", "mcap", "industry", "nsector"]).to_csv(os.path.join(UNI_DIR, "industry.csv"), index=False)
+        log.append(f"industry: {len(rows)}종목 시총·업종 저장")
+    except Exception as e:
+        log.append(f"industry: 받지 못함 ({type(e).__name__}: {e}) — 기존 목록 유지")
+    print(log[-1])
     with open(os.path.join(UNI_DIR, "log.txt"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(log) + "\n")
 
@@ -309,6 +426,15 @@ def load_universe(quick=False):
             if len(parts) > 1:
                 info["mysector"] = parts[1].strip()
             uni[tk] = info
+    ind = {}
+    ipath = os.path.join(UNI_DIR, "industry.csv")
+    if os.path.exists(ipath):
+        for tk, mc, nm, _ in pd.read_csv(ipath).values.tolist():
+            ind[str(tk)] = (mc, nm if isinstance(nm, str) else "")
+    for tk, info in uni.items():
+        mc, nm = ind.get(tk, (None, ""))
+        info["mcap"], info["industry"] = mc, nm
+        info["themes"] = themes_for(tk, nm, mc)
     if not uni:
         sys.exit("종목 목록이 비어 있습니다. 인터넷 연결 또는 my_tickers.txt를 확인하세요.")
     print(f"총 {len(uni)}종목")
@@ -996,8 +1122,9 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         s["kind"] = kind
         s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100
         s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
-                 sector_ko=info.get("mysector") or SECTOR_KO.get(info.get("sector") or "", None),
+                 sector_ko=sector_label(info),
                  sector_etf=etf, sector_stage=sec["stage"] if sec else None,
+                 theme_etfs=[e for _, e in info.get("themes") or [] if e], themes=[n for n, _ in info.get("themes") or []],
                  volGrade=grade_from(bd["volume"], 25), rsGrade=grade_from(bd["rs"], 10),
                  buy_stop=round(s["res"] * 1.005, 2) if s["close"] <= s["res"]
                  else round(s["brk_level"] * 1.005, 2) if s["brk_level"] else None)

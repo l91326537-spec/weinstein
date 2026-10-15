@@ -126,7 +126,7 @@ def main(fetch=None, universe=None):
         if t in uni and t not in byt and not info.get("mine"):
             continue          # 거래대금·가격 기준에서 걸러진 종목은 앱 데이터에서 뺌
         payload = dict(t=t, name=str(info.get("name") or names.get(t, t)), cap=info.get("cap"),
-                       sector=info.get("mysector") or S.SECTOR_KO.get(info.get("sector") or "", None),
+                       sector=S.sector_label(info),
                        w=series_payload(df, b))
         if t in byt:
             payload.update(stock_payload(byt[t]))
@@ -152,7 +152,7 @@ def main(fetch=None, universe=None):
                    slope=r2(v["slope"], 1), close=r2(v["close"])) if v else None) for t, v in R["mk"].items()}
     secs = []
     for t, v in R["sectors"].items():
-        members = [r for r in rows if r.get("sector_etf") == t]
+        members = [r for r in rows if r.get("sector_etf") == t or t in (r.get("theme_etfs") or [])]
         secs.append(dict(etf=t, f=safe(t), name=v["name"], stage=v["stage"], label=v["stage_label"],
                          ext=r2(v["ext"], 1), slope=r2(v["slope"], 1), rs=r2(v["rs"], 1),
                          kind="sector" if t in S.SECTOR_ETF.values() else "industry",
