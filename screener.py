@@ -204,7 +204,8 @@ ADR_LIST = {
                                ("TME", "Tencent Music"), ("VOD", "Vodafone")],
     "Consumer Staples": [("UL", "Unilever"), ("DEO", "Diageo"), ("BUD", "AB InBev"), ("BTI", "British American Tobacco")],
     "Energy": [("SHEL", "Shell"), ("BP", "BP"), ("TTE", "TotalEnergies"), ("EQNR", "Equinor"), ("E", "Eni"), ("PBR", "Petrobras"),
-               ("CNQ", "Canadian Natural Resources"), ("SU", "Suncor"), ("ENB", "Enbridge")],
+               ("CNQ", "Canadian Natural Resources"), ("SU", "Suncor"), ("ENB", "Enbridge"),
+               ("TRP", "TC Energy"), ("CCJ", "Cameco")],
     "Industrials": [("RELX", "RELX"), ("CNI", "Canadian National Railway"), ("CP", "Canadian Pacific Kansas City"),
                     ("RYAAY", "Ryanair"), ("ERJ", "Embraer")],
     "Materials": [("BHP", "BHP"), ("RIO", "Rio Tinto"), ("VALE", "Vale"), ("NTR", "Nutrien"), ("TECK", "Teck Resources"),
@@ -213,8 +214,30 @@ ADR_LIST = {
 }
 
 
-def _adr_list():
-    return [(tk, nm, sec) for sec, items in ADR_LIST.items() for tk, nm in items]
+ADR_MID = {   # 해외 중형주 (미국 상장)
+    "Information Technology": [("WIX", "Wix.com"), ("MNDY", "monday.com"), ("GLOB", "Globant"), ("NVMI", "Nova"), ("CAMT", "Camtek"),
+                               ("TSEM", "Tower Semiconductor"), ("SIMO", "Silicon Motion"), ("HIMX", "Himax"), ("OTEX", "Open Text"),
+                               ("CLS", "Celestica"), ("DOX", "Amdocs")],
+    "Health Care": [("TEVA", "Teva"), ("GRFS", "Grifols"), ("ASND", "Ascendis Pharma"), ("LEGN", "Legend Biotech"), ("ZLAB", "Zai Lab")],
+    "Financials": [("KB", "KB금융"), ("SHG", "신한지주"), ("WF", "우리금융"), ("LYG", "Lloyds"), ("NWG", "NatWest"), ("BAP", "Credicorp"),
+                   ("GGAL", "Grupo Galicia"), ("BSAC", "Banco Santander-Chile"), ("XP", "XP Inc"), ("PAGS", "PagSeguro"), ("STNE", "StoneCo"),
+                   ("FUTU", "Futu"), ("QFIN", "Qifu Technology")],
+    "Consumer Discretionary": [("GRAB", "Grab"), ("BEKE", "KE Holdings"), ("VIPS", "Vipshop"), ("HTHT", "H World"), ("MMYT", "MakeMyTrip"),
+                               ("ONON", "On Holding"), ("BIRK", "Birkenstock"), ("GOOS", "Canada Goose"), ("MGA", "Magna"), ("QSR", "Restaurant Brands"),
+                               ("ZTO", "ZTO Express")],
+    "Communication Services": [("KT", "KT"), ("SKM", "SK텔레콤"), ("CHT", "Chunghwa Telecom"), ("TEF", "Telefonica"), ("WB", "Weibo")],
+    "Consumer Staples": [("FMX", "FEMSA"), ("KOF", "Coca-Cola FEMSA"), ("ABEV", "Ambev")],
+    "Energy": [("CVE", "Cenovus"), ("IMO", "Imperial Oil"), ("TS", "Tenaris"), ("YPF", "YPF"), ("VIST", "Vista Energy"), ("PBA", "Pembina Pipeline")],
+    "Industrials": [("ESLT", "Elbit Systems"), ("CAE", "CAE"), ("AER", "AerCap"), ("GFL", "GFL Environmental"), ("PAC", "Grupo Aeroportuario del Pacifico"),
+                    ("ASR", "Grupo Aeroportuario del Sureste"), ("ZIM", "ZIM Shipping")],
+    "Materials": [("SQM", "SQM"), ("GFI", "Gold Fields"), ("AU", "AngloGold Ashanti"), ("KGC", "Kinross Gold"), ("PAAS", "Pan American Silver"),
+                  ("CX", "Cemex"), ("MT", "ArcelorMittal"), ("GGB", "Gerdau"), ("PKX", "POSCO홀딩스")],
+    "Utilities": [("KEP", "한국전력"), ("SBS", "Sabesp"), ("FTS", "Fortis"), ("BEP", "Brookfield Renewable")],
+}
+
+
+def _adr_list(src=None):
+    return [(tk, nm, sec) for sec, items in (src or ADR_LIST).items() for tk, nm in items]
 
 
 SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
@@ -224,6 +247,7 @@ SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
     ("sp400", "중형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 300)),
     ("r2000", "소형", _russell2000),
     ("adr", "대형", _adr_list),          # 해외 대형주 ADR (고정 목록)
+    ("adr_mid", "중형", lambda: _adr_list(ADR_MID)),   # 해외 중형주 (고정 목록)
 ]
 
 

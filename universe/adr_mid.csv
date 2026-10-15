@@ -1,0 +1,75 @@
+ticker,name,sector
+WIX,Wix.com,Information Technology
+MNDY,monday.com,Information Technology
+GLOB,Globant,Information Technology
+NVMI,Nova,Information Technology
+CAMT,Camtek,Information Technology
+TSEM,Tower Semiconductor,Information Technology
+SIMO,Silicon Motion,Information Technology
+HIMX,Himax,Information Technology
+OTEX,Open Text,Information Technology
+CLS,Celestica,Information Technology
+DOX,Amdocs,Information Technology
+TEVA,Teva,Health Care
+GRFS,Grifols,Health Care
+ASND,Ascendis Pharma,Health Care
+LEGN,Legend Biotech,Health Care
+ZLAB,Zai Lab,Health Care
+KB,KB금융,Financials
+SHG,신한지주,Financials
+WF,우리금융,Financials
+LYG,Lloyds,Financials
+NWG,NatWest,Financials
+BAP,Credicorp,Financials
+GGAL,Grupo Galicia,Financials
+BSAC,Banco Santander-Chile,Financials
+XP,XP Inc,Financials
+PAGS,PagSeguro,Financials
+STNE,StoneCo,Financials
+FUTU,Futu,Financials
+QFIN,Qifu Technology,Financials
+GRAB,Grab,Consumer Discretionary
+BEKE,KE Holdings,Consumer Discretionary
+VIPS,Vipshop,Consumer Discretionary
+HTHT,H World,Consumer Discretionary
+MMYT,MakeMyTrip,Consumer Discretionary
+ONON,On Holding,Consumer Discretionary
+BIRK,Birkenstock,Consumer Discretionary
+GOOS,Canada Goose,Consumer Discretionary
+MGA,Magna,Consumer Discretionary
+QSR,Restaurant Brands,Consumer Discretionary
+ZTO,ZTO Express,Consumer Discretionary
+KT,KT,Communication Services
+SKM,SK텔레콤,Communication Services
+CHT,Chunghwa Telecom,Communication Services
+TEF,Telefonica,Communication Services
+WB,Weibo,Communication Services
+FMX,FEMSA,Consumer Staples
+KOF,Coca-Cola FEMSA,Consumer Staples
+ABEV,Ambev,Consumer Staples
+CVE,Cenovus,Energy
+IMO,Imperial Oil,Energy
+TS,Tenaris,Energy
+YPF,YPF,Energy
+VIST,Vista Energy,Energy
+PBA,Pembina Pipeline,Energy
+ESLT,Elbit Systems,Industrials
+CAE,CAE,Industrials
+AER,AerCap,Industrials
+GFL,GFL Environmental,Industrials
+PAC,Grupo Aeroportuario del Pacifico,Industrials
+ASR,Grupo Aeroportuario del Sureste,Industrials
+ZIM,ZIM Shipping,Industrials
+SQM,SQM,Materials
+GFI,Gold Fields,Materials
+AU,AngloGold Ashanti,Materials
+KGC,Kinross Gold,Materials
+PAAS,Pan American Silver,Materials
+CX,Cemex,Materials
+MT,ArcelorMittal,Materials
+GGB,Gerdau,Materials
+PKX,POSCO홀딩스,Materials
+KEP,한국전력,Utilities
+SBS,Sabesp,Utilities
+FTS,Fortis,Utilities
+BEP,Brookfield Renewable,Utilities
