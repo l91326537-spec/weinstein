@@ -330,6 +330,13 @@ def big_winner_study(allsig, at, capmap, buckets):
     share("대·중형 · 기저 26주+ · 돌파 거래량 2배+ · RS 0+",
           (d["cap_"] != "소형") & (d["bl"] >= 26) & (d["evr"] >= 2) & (d["rs_"] >= 0) & d["kind"].isin(["B12", "B2"]))
     share("대·중형 · 시장·업종 모두 2단계 · RS 0+", (d["cap_"] != "소형") & (d["mkt_"] == 2) & (d["sec_"] == 2) & (d["rs_"] >= 0))
+    # 차트 패턴 (신호 시점)
+    if "hhhl" in next(iter(_FR.values())):
+        d["hhhl_"], d["lh_"], d["dbl_"], d["tpl_"], d["tl_"] = at("hhhl"), at("lh"), at("dbl13"), at("tpl13"), at("tl13")
+        share("고점·저점 모두 높아지는 중 (HH·HL)", d["hhhl_"] == 1); share("고점이 낮아지는 중 (LH)", d["lh_"] == 1)
+        share("최근 13주 안 이중 바닥 돌파", d["dbl_"] == 1); share("최근 13주 안 삼중 바닥 돌파", d["tpl_"] == 1)
+        share("최근 13주 안 하락 추세선 돌파", d["tl_"] == 1)
+        share("패턴 없음 (위 넷 모두 아님)", (d["hhhl_"] != 1) & (d["dbl_"] != 1) & (d["tpl_"] != 1) & (d["tl_"] != 1))
     # 오를 때 거래량 많고 내릴 때 적은 종목 (최근 10주 상승주 거래량 합 ÷ 하락주 거래량 합)
     d["updn_"] = at("updn")
     a_, b_ = d.loc[big, "updn_"].dropna(), d.loc[~big, "updn_"].dropna()
@@ -426,6 +433,87 @@ def crash_study(frames, start, capmap, earn):
         h_ = ev[ev["held"]]
         line("· 30주선 지킴 · 이후 13주 안 30주선 안 깨짐", h_[~h_["brk13"]])
         line("· 30주선 지킴 · 이후 13주 안 30주선 깨짐", h_[h_["brk13"]])
+
+
+def pattern_flags(f, k=3):
+    """주봉 패턴 (그 주까지 확인된 고점·저점만 사용 → 미래 정보 없음). 고점·저점 = 앞뒤 k주 중 최고·최저 (k주 뒤에 확정)
+       hhhl: 최근 고점 2개·저점 2개가 모두 높아짐 / lh: 최근 고점 2개가 낮아짐
+       dbl / tpl: 이중·삼중 바닥 넥라인(바닥 사이 고점) 종가 돌파한 주 / tl: 낮아지는 고점 2개를 이은 하락 추세선을 종가로 돌파한 주"""
+    h, l, c = f["high"].values, f["low"].values, f["close"].values
+    n = len(f)
+    hhhl, lh, dbl, tpl, tl = (np.zeros(n) for _ in range(5))
+    ph, pl = [], []           # 확정된 (위치, 값)
+    used_dbl, used_tl = -1, -1
+    for j in range(2 * k + 1, n):
+        i = j - k               # 이번 주에 확정되는 후보
+        w = slice(i - k, i + k + 1)
+        if h[i] == np.nanmax(h[w]):
+            ph.append((i, h[i]))
+        if l[i] == np.nanmin(l[w]):
+            pl.append((i, l[i]))
+        if len(ph) >= 2 and len(pl) >= 2:
+            hhhl[j] = float(ph[-1][1] > ph[-2][1] and pl[-1][1] > pl[-2][1])
+        if len(ph) >= 2:
+            lh[j] = float(ph[-1][1] < ph[-2][1])
+            (i1, v1), (i2, v2) = ph[-2], ph[-1]
+            if v2 < v1 and i2 > i1 and i2 > used_tl:
+                line = lambda x: v1 + (v2 - v1) * (x - i1) / (i2 - i1)
+                if c[j] > line(j) and c[j - 1] <= line(j - 1):
+                    tl[j] = 1.0; used_tl = i2
+        if len(pl) >= 2:
+            (a1, b1), (a2, b2) = pl[-2], pl[-1]
+            if a2 - a1 >= 4 and abs(b2 / b1 - 1) <= 0.03 and a2 > used_dbl:
+                mids = [v for x, v in ph if a1 < x < a2]
+                if mids and c[j] > max(mids) and c[j - 1] <= max(mids):
+                    if len(pl) >= 3 and pl[-2][0] - pl[-3][0] >= 4 and abs(pl[-3][1] / b1 - 1) <= 0.04:
+                        tpl[j] = 1.0
+                    else:
+                        dbl[j] = 1.0
+                    used_dbl = a2
+    f["hhhl"], f["lh"], f["dbl"], f["tpl"], f["tl"] = hhhl, lh, dbl, tpl, tl
+    for col in ("dbl", "tpl", "tl"):
+        f[col + "13"] = pd.Series(f[col].values, index=f.index).rolling(13, min_periods=1).max().values
+
+
+def pattern_study(frames, start, capmap):
+    """패턴이 완성된(돌파한) 주 종가에 샀다면 이후 수익률 (대·중형). 기준: 아무 주"""
+    hz = (13, 26, 52)
+    ev = {}
+    base = []
+    for t, f in frames.items():
+        if capmap.get(t) == "소형":
+            continue
+        if "dbl" not in f:
+            pattern_flags(f)
+        c, ma, st, idx = f["close"].values, f["ma30"].values, f["stage"].values, f.index
+        n = len(f)
+        cols = {"이중 바닥 넥라인 돌파": f["dbl"].values, "삼중 바닥 넥라인 돌파": f["tpl"].values, "하락 추세선 돌파": f["tl"].values,
+                "고점·저점 높아지기 시작 (HH·HL)": f["hhhl"].values, "고점 낮아지기 시작 (LH)": f["lh"].values,
+                "역헤드앤숄더 돌파": f["ihs"].values if "ihs" in f else np.zeros(n), "헤드앤숄더 천장 완성": f["hs_top"].values if "hs_top" in f else np.zeros(n)}
+        prev = {k: 0 for k in cols}
+        for i in range(1, n):
+            if idx[i] < start:
+                continue
+            fwd = [(c[i + h] / c[i] - 1) * 100 if i + h < n else np.nan for h in hz]
+            if i % 4 == 0:
+                base.append(fwd)
+            for nm, a in cols.items():
+                v = a[i] if not (isinstance(a[i], float) and math.isnan(a[i])) else 0
+                if v > 0 and prev[nm] <= 0:
+                    above = (not math.isnan(ma[i])) and c[i] > ma[i]
+                    ev.setdefault(nm, []).append(fwd + [above, st[i]])
+                prev[nm] = v
+    def line(lab, rows):
+        if not len(rows):
+            print(f"  [패턴] {lab}: 0건"); return
+        d = np.array([r[:3] for r in rows], float)
+        med = " · ".join(f"{h}주 {np.nanmedian(d[:, j]):+.1f}%" for j, h in enumerate(hz))
+        print(f"  [패턴] {lab}: {len(rows)}건 · 중앙값 {med} · 26주 뒤 오른 비율 {np.nanmean(d[:, 1] > 0) * 100:.0f}%")
+    line("기준: 대·중형주 아무 주", base)
+    for nm, rows in ev.items():
+        line(nm, rows)
+        line(f"· {nm} · 30주선 위", [r for r in rows if r[3]])
+        line(f"· {nm} · 30주선 아래", [r for r in rows if not r[3]])
 
 
 def _bounce(f, i, quiet):
@@ -1692,6 +1780,12 @@ def main(argv=None, fetch=None, universe=None):
         crash_study(frames, start, capmap, fetch_earnings(sorted(t for t in frames if capmap.get(t) != "소형")))
     except Exception as ex:
         print("  급락 후 분석 실패:", ex)
+    try:
+        for f in frames.values():
+            pattern_flags(f)
+        pattern_study(frames, start, capmap)
+    except Exception as ex:
+        print("  패턴 분석 실패:", ex)
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
     OUT = dict(out=True)
