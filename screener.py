@@ -424,7 +424,8 @@ def load_universe(quick=False):
                 continue
             cur = uni.get(tk)
             if cur is None or CAP_ORDER[cap] < CAP_ORDER[cur["cap"]]:
-                uni[tk] = {"name": name, "sector": sec or (cur or {}).get("sector"), "bench": "us", "cap": cap}
+                uni[tk] = {"name": name, "sector": sec or (cur or {}).get("sector"), "bench": "us", "cap": cap,
+                           "src": (cur or {}).get("src") or key}
         print(f"  {key}: {len(rows or [])}종목")
     for tk, sec in SECTOR_FIX.items():          # 나스닥100에만 있어 업종이 비는 종목
         if tk in uni and not uni[tk].get("sector"):
@@ -439,7 +440,7 @@ def load_universe(quick=False):
             parts = line.split(maxsplit=1)
             tk = parts[0].upper()
             b = "ks" if tk.endswith(".KS") else "kq" if tk.endswith(".KQ") else "us"
-            info = uni.get(tk, {"name": tk, "sector": None, "bench": b, "cap": "기타"})
+            info = uni.get(tk, {"name": tk, "sector": None, "bench": b, "cap": "기타", "src": "mine"})
             info["mine"] = True
             if len(parts) > 1:
                 info["mysector"] = parts[1].strip()
@@ -460,7 +461,7 @@ def load_universe(quick=False):
                 nm = re.sub(r"\s+(Class [A-C]\s+)?(Common Stock|Common Shares|Ordinary Shares|Limited Voting Shares|American Depositary Shares|"
                             r"New York Registry Shares|ADS|Shares)\b.*$", "", nm).strip(" .,")
                 uni[tk] = {"name": nm or tk, "sector": NASDAQ_SECTOR.get(r.nsector, r.nsector if r.nsector in SECTOR_ETF else None),
-                           "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형"}
+                           "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형", "src": "nasdaq"}
             print(f"  나스닥 시총 2조원+ 추가: {len(uni) - n0}종목")
     for tk, info in uni.items():
         mc, nm = ind.get(tk, (None, ""))

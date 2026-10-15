@@ -296,6 +296,9 @@ def reclaim_study(frames, start, capmap, maxk=8):
     return pd.DataFrame(rows)
 
 
+_FR, _SECMAP, _GOLD = {}, {}, {}
+
+
 def big_winner_study(allsig, at, capmap, buckets):
     """큰 수익(3R+, 5R+) 거래와 나머지 거래의 특징 비교 (신호 시점 값)"""
     d = allsig.copy()
@@ -327,6 +330,41 @@ def big_winner_study(allsig, at, capmap, buckets):
     share("대·중형 · 기저 26주+ · 돌파 거래량 2배+ · RS 0+",
           (d["cap_"] != "소형") & (d["bl"] >= 26) & (d["evr"] >= 2) & (d["rs_"] >= 0) & d["kind"].isin(["B12", "B2"]))
     share("대·중형 · 시장·업종 모두 2단계 · RS 0+", (d["cap_"] != "소형") & (d["mkt_"] == 2) & (d["sec_"] == 2) & (d["rs_"] >= 0))
+    # 시장이 약할 때(2단계 아님) 나온 신호: 방어 업종·저베타 vs 그 외
+    d["beta_"] = at("beta") if "beta" in next(iter(_FR.values())) else np.nan
+    sec = d["ticker"].map(_SECMAP).fillna("")
+    gold = d["ticker"].map(_GOLD).fillna(False).astype(bool)
+    dfn = sec.isin(["Utilities", "Consumer Staples", "Health Care"]) | gold
+    weak = d["mkt_"] != 2
+    share("시장 약할 때 · 방어 업종(유틸·필수소비재·헬스케어·금광)", weak & dfn)
+    share("시장 약할 때 · 그 외 업종", weak & ~dfn)
+    share("시장 약할 때 · 베타 0.8 미만", weak & (d["beta_"] < 0.8))
+    share("시장 약할 때 · 베타 0.8~1.3", weak & (d["beta_"] >= 0.8) & (d["beta_"] < 1.3))
+    share("시장 약할 때 · 베타 1.3 이상", weak & (d["beta_"] >= 1.3))
+    share("시장 약할 때 · 그 외 업종 · 대·중형 · RS 0+", weak & ~dfn & (d["cap_"] != "소형") & (d["rs_"] >= 0))
+    share("시장 2단계 · 방어 업종", ~weak & dfn); share("시장 2단계 · 그 외 업종", ~weak & ~dfn)
+
+
+def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap):
+    """종목 범위별 같은 전략: 원래 지수 목록만 / + 해외 ADR / + 나스닥 시총 2조원+ 추가 종목. 반환: 곡선 표 행"""
+    sig0, eq0, _ = base_run
+    src = sig0["ticker"].map(srcmap).fillna("mine")
+    base = src.isin(["sp500", "ndx", "sp400", "r2000", "mine"])
+    adr = src.isin(["adr", "adr_mid"])
+    nas = src == "nasdaq"
+    rows = []
+    for nm, m in (("원래 지수 목록만 (S&P500·400·나스닥100·러셀2000)", base), ("원래 + 해외 ADR", base | adr),
+                  ("원래 + 나스닥 시총 2조원+ 추가", base | nas), ("전체 (지금 앱)", base | adr | nas)):
+        e_, t_ = run_portfolio(sig0[m], frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[종목 범위] {nm}", f"같은 규칙 · 거래 {len(t_)}건", e_["equity"]))
+    cl = sig0[~sig0["dup"]] if "dup" in sig0 else sig0
+    cs = cl["ticker"].map(srcmap).fillna("mine")
+    for nm, m in (("원래 지수", cs.isin(["sp500", "ndx", "sp400", "r2000", "mine"])), ("해외 ADR", cs.isin(["adr", "adr_mid"])), ("나스닥 추가", cs == "nasdaq")):
+        st = stats_trades(cl[m & (cl["score"] >= ms0)])
+        print(f"  [종목 범위] {nm} 종목의 {ms0}점+ 신호: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R")
+    for r in rows:
+        print(f"  {r['name']}: 연평균 {f_(r['c'].get('cagr'))}% · 최대낙폭 {f_(r['c'].get('mdd'))}% · 앞 {f_(r['a'].get('cagr'))}% · 뒤 {f_(r['b'].get('cagr'))}% · {r['desc']}")
+    return rows
 
 
 def _bounce(f, i, quiet):
@@ -1659,6 +1697,11 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     try:
+        lev[0].extend(universe_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap,
+                                     {t: v.get("src") for t, v in uni.items()}))
+    except Exception as ex:
+        print("  종목 범위 비교 실패:", ex)
+    try:
         rrows, rtrows = range_study(frames, cal, dfs, start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
         lev[0].extend(rrows)
     except Exception as ex:
@@ -1708,6 +1751,9 @@ def main(argv=None, fetch=None, universe=None):
         buckets.append((lab, stats_trades(bk2[m])))
     allsig["sm"] = allsig["ticker"].map(capmap) == "소형"
     try:
+        _FR.update(frames)
+        _SECMAP.update({t: v.get("sector") for t, v in uni.items()})
+        _GOLD.update({t: any(n == "금광" for n, _ in (v.get("themes") or [])) for t, v in uni.items()})
         big_winner_study(allsig, at, capmap, buckets)
     except Exception as ex:
         print("  큰 수익 종목 특징 분석 실패:", ex)
