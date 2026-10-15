@@ -107,27 +107,35 @@ THEME_RULES = [
     (("major banks", "commercial banks"), "은행", "KBE"),
     (("investment bankers", "investment managers", "finance/investors services"), "증권·자산운용", "IAI"),
     (("insurers", "insurance"), "보험", "KIE"),
-    (("real estate investment trusts",), "리츠·부동산", None),
-    (("oilfield services",), "석유서비스", "OIH"),
+    (("real estate",), "리츠·부동산", None),
+    (("oilfield services", "oil and gas field machinery"), "석유서비스", "OIH"),
     (("oil & gas production", "integrated oil", "oil refining", "oil/gas transmission"), "석유·가스", "XOP"),
     (("electric utilities", "power generation", "natural gas distribution", "water supply"), "유틸리티", None),
     (("aerospace", "military/government"), "항공우주·방산", "ITA"),
     (("marine transportation",), "해운", "BDRY"),
-    (("air freight", "trucking", "railroads", "transportation services"), "운송·물류", "IYT"),
+    (("air freight", "trucking", "railroads", "transportation services", "freight & logistics"), "운송·물류", "IYT"),
     (("restaurants",), "외식", "EATZ"),
     (("hotels/resorts", "amusement", "recreational"), "레저·여행", "PEJ"),
     (("homebuilding",), "주택건설(건설사)", "ITB"),
-    (("building products", "building materials", "engineering & construction"), "건설·건자재", "PAVE"),
+    (("building products", "building materials", "engineering & construction", "line construction"), "건설·건자재", "PAVE"),
     (("auto manufacturing", "auto parts"), "자동차", "CARZ"),
-    (("clothing", "department/specialty retail", "retail", "shoe"), "소매", "XRT"),
+    (("clothing", "department/specialty retail", "retail", "shoe", "apparel", "specialty stores", "supply stores", "video chains"), "소매", "XRT"),
     (("precious metals",), "금광", "GDX"),
     (("steel/iron ore",), "철강", "SLX"),
     (("metal mining", "mining & quarrying", "coal mining"), "금속·광업", "XME"),
-    (("chemicals",), "화학", None),
-    (("packaged foods", "beverages", "meat/poultry", "food chains", "specialty foods"), "식품·음료", "PBJ"),
-    (("electrical products", "industrial machinery", "power generation equipment"), "전력망·전기장비", "GRID"),
+    (("chemicals", "paints/coatings"), "화학", None),
+    (("packaged foods", "beverages", "meat/poultry", "food chains", "specialty foods", "food distributors"), "식품·음료", "PBJ"),
+    (("farming/seeds", "agricultural chemicals"), "농업", "MOO"),
+    (("electrical products", "power generation equipment"), "전력망·전기장비", "GRID"),
+    (("industrial machinery", "metal fabrications", "industrial specialties", "fluid controls", "construction/ag equipment"), "기계·산업장비", None),
     (("movies/entertainment", "cable & other pay television", "broadcasting", "newspapers", "publishing"), "미디어·엔터", None),
     (("telecommunications",), "통신서비스", None),
+    (("finance: consumer services", "finance companies"), "소비자금융·카드", None),
+    (("package goods/cosmetics", "consumer specialties"), "화장품·생활용품", None),
+    (("consumer electronics", "home furnishings"), "가전·가구", None),
+    (("containers/packaging", "plastic products", "forest products", "paper"), "포장·임산물", None),
+    (("environmental services",), "환경·폐기물", None),
+    (("business services", "professional services", "commercial services", "consumer services", "office equipment"), "비즈니스 서비스", None),
 ]
 # 여러 업종에 걸친 테마 (종목이 원래 업종과 함께 여기에도 들어감)
 THEME_LIST = {
@@ -142,7 +150,12 @@ THEME_LIST = {
     "크립토": ("BKCH", "COIN MSTR MARA RIOT CLSK HUT CORZ IREN CIFR HOOD"),
     "태양광": ("TAN", "FSLR ENPH SEDG RUN NXT ARRY CSIQ"),
     "중국 인터넷": ("KWEB", "BABA PDD JD BIDU NTES TCOM BILI TME VIPS BEKE WB"),
+    "결제·카드": (None, "V MA AXP PYPL COF SYF FI FIS GPN XYZ FOUR"),
+    "전력망·전기장비": ("GRID", "ETN GEV VRT PWR HUBB POWL"),
 }
+# 나스닥 업종이 실제 사업과 다른 종목의 대표 업종 고치기
+THEME_FIX = {"GE": ("항공우주·방산", "ITA"), "ETN": ("전력망·전기장비", "GRID"), "GEV": ("전력망·전기장비", "GRID"),
+             "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None)}
 
 
 def sector_label(info):
@@ -164,7 +177,7 @@ def themes_for(tk, industry=None, mcap=None):
     if mcap is not None and not pd.isna(mcap) and mcap < THEME_MIN_MCAP:
         return []
     out = []
-    nm, etf = theme_of_industry(industry)
+    nm, etf = THEME_FIX.get(tk) or theme_of_industry(industry)
     if nm == "바이오" and "pharmaceutical" in (industry or "").lower() and mcap is not None and not pd.isna(mcap) and mcap >= 3e10:
         nm, etf = "제약", "PPH"          # 나스닥은 대형 제약사도 'Biotechnology: Pharmaceutical Preparations'로 분류
     if nm:
