@@ -385,7 +385,9 @@ def supply_study(frames, cal, base_run, sig_s, sig_s0, ms0, mp, fill, msmall, ca
     for nm, sg in (("감점 없음", sig_s0), (f"감점 -{S.CFG['supply_pts']}", sig_s)):
         e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
         rows.append(curve_row(f"[전고점 매물] {nm}", f"위 {S.CFG['supply_room']:.0f}% 안 2년 내 전고점 {S.CFG['supply_weeks']}주+ · 큰 하락 뒤 긴 기저 제외 · 거래 {len(t_)}건", e_["equity"]))
-        print(f"  {rows[-1]['name']}: 연평균 {f_(rows[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(rows[-1]['c'].get('mdd'))}%")
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
     return rows
 
 

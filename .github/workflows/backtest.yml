@@ -14,6 +14,8 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    env:
+      SEC_UA: ${{ secrets.SEC_UA }}   # SEC 공시 확인용 'User-Agent' (이름 + 연락 이메일). 없으면 이벤트 거래량 거르기를 건너뜀
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
