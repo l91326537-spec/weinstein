@@ -457,6 +457,8 @@ def load_universe(quick=False):
                 tk, nm = str(r.ticker), str(r.name if isinstance(r.name, str) else "")
                 if tk in uni or pd.isna(r.mcap) or r.mcap < THEME_MIN_MCAP or not re.match(r"^[A-Z]{1,5}(-[A-Z])?$", tk) or _NOT_COMMON.search(nm):
                     continue
+                nm = re.sub(r"\s+(Class [A-C]\s+)?(Common Stock|Common Shares|Ordinary Shares|Limited Voting Shares|American Depositary Shares|"
+                            r"New York Registry Shares|ADS|Shares)\b.*$", "", nm).strip(" .,")
                 uni[tk] = {"name": nm or tk, "sector": NASDAQ_SECTOR.get(r.nsector, r.nsector if r.nsector in SECTOR_ETF else None),
                            "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형"}
             print(f"  나스닥 시총 2조원+ 추가: {len(uni) - n0}종목")
