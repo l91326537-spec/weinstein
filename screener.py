@@ -185,12 +185,45 @@ def _first_ok(*fns):
     raise err
 
 
+# 미국에 ADR·직상장으로 거래되는 해외 대형주 (S&P·나스닥100·러셀 지수에는 안 들어감). 업종은 GICS 섹터
+ADR_LIST = {
+    "Information Technology": [("TSM", "TSMC"), ("ASML", "ASML"), ("SAP", "SAP"), ("INFY", "Infosys"), ("STM", "STMicroelectronics"),
+                               ("UMC", "United Microelectronics"), ("ASX", "ASE Technology"), ("CHKP", "Check Point Software"),
+                               ("NICE", "NICE"), ("LOGI", "Logitech")],
+    "Health Care": [("NVO", "Novo Nordisk"), ("AZN", "AstraZeneca"), ("NVS", "Novartis"), ("GSK", "GSK"), ("SNY", "Sanofi"),
+                    ("TAK", "Takeda"), ("ARGX", "argenx"), ("GMAB", "Genmab"), ("BNTX", "BioNTech")],
+    "Financials": [("HSBC", "HSBC"), ("UBS", "UBS"), ("MUFG", "Mitsubishi UFJ"), ("SMFG", "Sumitomo Mitsui"), ("MFG", "Mizuho"),
+                   ("ING", "ING"), ("BCS", "Barclays"), ("SAN", "Banco Santander"), ("BBVA", "BBVA"), ("DB", "Deutsche Bank"),
+                   ("RY", "Royal Bank of Canada"), ("TD", "Toronto-Dominion Bank"), ("BMO", "Bank of Montreal"), ("BNS", "Bank of Nova Scotia"),
+                   ("CM", "CIBC"), ("HDB", "HDFC Bank"), ("IBN", "ICICI Bank"), ("ITUB", "Itau Unibanco"), ("NU", "Nu Holdings"),
+                   ("BN", "Brookfield"), ("MFC", "Manulife"), ("SLF", "Sun Life")],
+    "Consumer Discretionary": [("TM", "Toyota"), ("HMC", "Honda"), ("SONY", "Sony"), ("BABA", "Alibaba"), ("JD", "JD.com"),
+                               ("RACE", "Ferrari"), ("STLA", "Stellantis"), ("TCOM", "Trip.com"), ("YUMC", "Yum China"),
+                               ("NIO", "NIO"), ("LI", "Li Auto"), ("XPEV", "XPeng")],
+    "Communication Services": [("BIDU", "Baidu"), ("SPOT", "Spotify"), ("SE", "Sea Ltd"), ("NTES", "NetEase"), ("BILI", "Bilibili"),
+                               ("TME", "Tencent Music"), ("VOD", "Vodafone")],
+    "Consumer Staples": [("UL", "Unilever"), ("DEO", "Diageo"), ("BUD", "AB InBev"), ("BTI", "British American Tobacco")],
+    "Energy": [("SHEL", "Shell"), ("BP", "BP"), ("TTE", "TotalEnergies"), ("EQNR", "Equinor"), ("E", "Eni"), ("PBR", "Petrobras"),
+               ("CNQ", "Canadian Natural Resources"), ("SU", "Suncor"), ("ENB", "Enbridge")],
+    "Industrials": [("RELX", "RELX"), ("CNI", "Canadian National Railway"), ("CP", "Canadian Pacific Kansas City"),
+                    ("RYAAY", "Ryanair"), ("ERJ", "Embraer")],
+    "Materials": [("BHP", "BHP"), ("RIO", "Rio Tinto"), ("VALE", "Vale"), ("NTR", "Nutrien"), ("TECK", "Teck Resources"),
+                  ("AEM", "Agnico Eagle"), ("WPM", "Wheaton Precious Metals"), ("FNV", "Franco-Nevada")],
+    "Utilities": [("NGG", "National Grid")],
+}
+
+
+def _adr_list():
+    return [(tk, nm, sec) for sec, items in ADR_LIST.items() for tk, nm in items]
+
+
 SOURCES = [  # (파일 이름, 크기 구분, 받는 함수)
     ("sp500", "대형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 400)),
     ("ndx", "대형", lambda: _first_ok(lambda: _wiki_index("https://en.wikipedia.org/wiki/Nasdaq-100", 90),
                                        _nasdaq100_api)),
     ("sp400", "중형", lambda: _wiki_index("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 300)),
     ("r2000", "소형", _russell2000),
+    ("adr", "대형", _adr_list),          # 해외 대형주 ADR (고정 목록)
 ]
 
 

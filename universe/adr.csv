@@ -1,0 +1,88 @@
+ticker,name,sector
+TSM,TSMC,Information Technology
+ASML,ASML,Information Technology
+SAP,SAP,Information Technology
+INFY,Infosys,Information Technology
+STM,STMicroelectronics,Information Technology
+UMC,United Microelectronics,Information Technology
+ASX,ASE Technology,Information Technology
+CHKP,Check Point Software,Information Technology
+NICE,NICE,Information Technology
+LOGI,Logitech,Information Technology
+NVO,Novo Nordisk,Health Care
+AZN,AstraZeneca,Health Care
+NVS,Novartis,Health Care
+GSK,GSK,Health Care
+SNY,Sanofi,Health Care
+TAK,Takeda,Health Care
+ARGX,argenx,Health Care
+GMAB,Genmab,Health Care
+BNTX,BioNTech,Health Care
+HSBC,HSBC,Financials
+UBS,UBS,Financials
+MUFG,Mitsubishi UFJ,Financials
+SMFG,Sumitomo Mitsui,Financials
+MFG,Mizuho,Financials
+ING,ING,Financials
+BCS,Barclays,Financials
+SAN,Banco Santander,Financials
+BBVA,BBVA,Financials
+DB,Deutsche Bank,Financials
+RY,Royal Bank of Canada,Financials
+TD,Toronto-Dominion Bank,Financials
+BMO,Bank of Montreal,Financials
+BNS,Bank of Nova Scotia,Financials
+CM,CIBC,Financials
+HDB,HDFC Bank,Financials
+IBN,ICICI Bank,Financials
+ITUB,Itau Unibanco,Financials
+NU,Nu Holdings,Financials
+BN,Brookfield,Financials
+MFC,Manulife,Financials
+SLF,Sun Life,Financials
+TM,Toyota,Consumer Discretionary
+HMC,Honda,Consumer Discretionary
+SONY,Sony,Consumer Discretionary
+BABA,Alibaba,Consumer Discretionary
+JD,JD.com,Consumer Discretionary
+RACE,Ferrari,Consumer Discretionary
+STLA,Stellantis,Consumer Discretionary
+TCOM,Trip.com,Consumer Discretionary
+YUMC,Yum China,Consumer Discretionary
+NIO,NIO,Consumer Discretionary
+LI,Li Auto,Consumer Discretionary
+XPEV,XPeng,Consumer Discretionary
+BIDU,Baidu,Communication Services
+SPOT,Spotify,Communication Services
+SE,Sea Ltd,Communication Services
+NTES,NetEase,Communication Services
+BILI,Bilibili,Communication Services
+TME,Tencent Music,Communication Services
+VOD,Vodafone,Communication Services
+UL,Unilever,Consumer Staples
+DEO,Diageo,Consumer Staples
+BUD,AB InBev,Consumer Staples
+BTI,British American Tobacco,Consumer Staples
+SHEL,Shell,Energy
+BP,BP,Energy
+TTE,TotalEnergies,Energy
+EQNR,Equinor,Energy
+E,Eni,Energy
+PBR,Petrobras,Energy
+CNQ,Canadian Natural Resources,Energy
+SU,Suncor,Energy
+ENB,Enbridge,Energy
+RELX,RELX,Industrials
+CNI,Canadian National Railway,Industrials
+CP,Canadian Pacific Kansas City,Industrials
+RYAAY,Ryanair,Industrials
+ERJ,Embraer,Industrials
+BHP,BHP,Materials
+RIO,Rio Tinto,Materials
+VALE,Vale,Materials
+NTR,Nutrien,Materials
+TECK,Teck Resources,Materials
+AEM,Agnico Eagle,Materials
+WPM,Wheaton Precious Metals,Materials
+FNV,Franco-Nevada,Materials
+NGG,National Grid,Utilities
