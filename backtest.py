@@ -1604,6 +1604,8 @@ def main(argv=None, fetch=None, universe=None):
     start = pd.Timestamp(args.start)
     uni = universe or S.load_universe(args.quick)
     uni = {k: v for k, v in uni.items() if v.get("bench") == "us"}
+    if not S.ADR_BUY:      # 앱과 같게: 해외 ADR(내 관심 종목 제외)은 매수 대상에서 뺌
+        uni = {k: v for k, v in uni.items() if v.get("src") not in ("adr", "adr_mid") or v.get("mine")}
     years = (pd.Timestamp.today() - start).days / 365.25 + 3      # 지표 계산용 3년 더
     need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ"]
     print(f"{len(need)}개 종목의 약 {years:.0f}년치 주봉을 받습니다 (처음엔 5~15분 걸릴 수 있어요)")

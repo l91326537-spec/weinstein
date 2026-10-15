@@ -216,6 +216,7 @@ def _nasdaq_screener():
 
 
 CAP_ORDER = {"대형": 0, "중형": 1, "소형": 2}
+ADR_BUY = False              # 해외 ADR(내 관심 종목 제외)에 매수 신호를 낼지. 백테스트에서 넣으면 성과가 나빠 끔
 SECTOR_FIX = {"ASML": "Information Technology", "MSTR": "Information Technology", "ALNY": "Health Care",
               "MELI": "Consumer Discretionary", "SHOP": "Information Technology", "CCEP": "Consumer Staples",
               "PDD": "Consumer Discretionary", "RKLB": "Industrials", "ARM": "Information Technology",
@@ -1147,6 +1148,9 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
                        or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n or "들락날락" in n or "급락" in n or "볼린저" in n]
         if q["pinned"]:
             sig2 = ""
+        if not ADR_BUY and info.get("src") in ("adr", "adr_mid") and not info.get("mine") and sig2:
+            sig2 = ""                 # 백테스트: 해외 ADR을 넣으면 연평균 15.4% → 12.1% (신호 평균 1.5R vs 지수 종목 2.7R) → 매수 신호는 끔
+            caps = caps + ["해외 ADR · 매수 신호 제외 (백테스트상 성과 저조)"]
         kind = signal_kind(s, sig2)
         if kind == "1→2 돌파" and CFG["b12_pts"] and not q["pinned"]:
             score = min(100, score + CFG["b12_pts"])          # 백테스트: 1→2 돌파 1.61R vs 2단계 중간 돌파 1.37R, 포트폴리오도 가장 좋았음
