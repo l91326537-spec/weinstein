@@ -330,6 +330,14 @@ def big_winner_study(allsig, at, capmap, buckets):
     share("대·중형 · 기저 26주+ · 돌파 거래량 2배+ · RS 0+",
           (d["cap_"] != "소형") & (d["bl"] >= 26) & (d["evr"] >= 2) & (d["rs_"] >= 0) & d["kind"].isin(["B12", "B2"]))
     share("대·중형 · 시장·업종 모두 2단계 · RS 0+", (d["cap_"] != "소형") & (d["mkt_"] == 2) & (d["sec_"] == 2) & (d["rs_"] >= 0))
+    # 오를 때 거래량 많고 내릴 때 적은 종목 (최근 10주 상승주 거래량 합 ÷ 하락주 거래량 합)
+    d["updn_"] = at("updn")
+    a_, b_ = d.loc[big, "updn_"].dropna(), d.loc[~big, "updn_"].dropna()
+    if len(a_):
+        print(f"  [큰 수익] 상승/하락 거래량 비율(10주): 3R+ 중앙값 {a_.median():.2f} · 나머지 {b_.median():.2f}")
+    for lab, lo, hi in (("0.9 미만 (내릴 때 거래량 더 많음)", 0, 0.9), ("0.9~1.1", 0.9, 1.1), ("1.1~1.5", 1.1, 1.5), ("1.5~2", 1.5, 2), ("2 이상 (오를 때 거래량 2배+)", 2, 99)):
+        share(f"상승/하락 거래량 비율 {lab}", (d["updn_"] >= lo) & (d["updn_"] < hi))
+    share("상승/하락 거래량 1.5+ · 대·중형 · RS 0+", (d["updn_"] >= 1.5) & (d["cap_"] != "소형") & (d["rs_"] >= 0))
     # 시장이 약할 때(2단계 아님) 나온 신호: 방어 업종·저베타 vs 그 외
     d["beta_"] = at("beta") if "beta" in next(iter(_FR.values())) else np.nan
     sec = d["ticker"].map(_SECMAP).fillna("")
