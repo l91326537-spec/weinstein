@@ -92,6 +92,19 @@ function holdStatus(td, h) {
 }
 
 /* ---------- 규칙 점검 (매수 기록 시) ---------- */
+/* 시가총액: 원화(조·억)로, 환율 없으면 달러 */
+function mcTxt(mc) {
+  if (!mc) return "";
+  const fx = SUM && SUM.fx;
+  if (!fx) return mc >= 1e9 ? `$${(mc / 1e9).toFixed(mc >= 1e11 ? 0 : 1)}B` : `$${Math.round(mc / 1e6)}M`;
+  const k = mc * fx;
+  return k >= 1e12 ? `${(k / 1e12).toFixed(k >= 1e13 ? 0 : 1)}조` : `${Math.round(k / 1e8).toLocaleString()}억`;
+}
+function capTag(cap, mc) {
+  const c = cap && cap !== "기타" ? `<b class="capt">${esc(cap)}</b> ` : "";
+  const m = mcTxt(mc);
+  return c + (m ? `<span class="muted">시총 ${m}</span> · ` : "");
+}
 /* 업종 ETF 화면: 그 업종에 속한 종목 (점수 순) */
 let secCapAll = false;
 function secMembers(t) {
@@ -102,9 +115,9 @@ function secMembers(t) {
   return `<section class="card" id="secmem"><div class="row between"><h2>${esc(sec.name)} 종목 ${rows.length}</h2>
     ${nSmall ? `<button class="btn sm" id="secsmall">${secCapAll ? "소형주 숨기기" : `소형주 ${nSmall}개 보기`}</button>` : ""}</div>
     <p class="note">점수 순 · 업종 ${sec.stage}단계${sec.stage === 2 ? " (좋음)" : sec.stage >= 3 ? " (조심)" : ""}</p>
-    <div class="list">${rows.map(([tk, sc, st, sg, cap, ext, nm]) => `<a class="item" href="#stock/${encodeURIComponent(tk)}">${pill(st)}
+    <div class="list">${rows.map(([tk, sc, st, sg, cap, ext, nm, mc]) => `<a class="item" href="#stock/${encodeURIComponent(tk)}">${pill(st)}
       <span style="min-width:0"><span class="t">${esc(tk)}</span> ${sg ? `<span class="pill st2">${esc(sg)}</span>` : ""}
-      <div class="n">${cap && cap !== "기타" ? `<b class="capt">${esc(cap)}</b> ` : ""}${esc(nm)} · 이격 ${ext ?? "–"}%</div></span>
+      <div class="n">${capTag(cap, mc)}${esc(nm)} · 이격 ${ext ?? "–"}%</div></span>
       <span class="r"><b>${sc}</b><span class="muted" style="font-size:11px">점</span></span></a>`).join("")}</div></section>`;
 }
 /* 점수가 낮은 항목의 이유 (점수 구성 아래 한 줄) */
@@ -298,7 +311,7 @@ function planLines(c) {
 function candItem(c, rank) {
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
-    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}${c.mvOk ? ` <span class="pill st2" title="미너비니 트렌드 템플릿 충족">미너비니</span>` : ""}<div class="n">${c.cap && c.cap !== "기타" ? `<b class="capt">${esc(c.cap)}</b> ` : ""}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
+    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}${c.mvOk ? ` <span class="pill st2" title="미너비니 트렌드 템플릿 충족">미너비니</span>` : ""}<div class="n">${capTag(c.cap, c.mc)}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
     <span class="sub" style="display:grid;gap:2px">${planLines(c)}<span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급${c.brkVr ? ` · 돌파 주 거래량 <b>${fmt(c.brkVr, 1)}배</b>` : ""}</span></span></a>`;
 }
@@ -333,7 +346,7 @@ function bindSearch(v) {
   const run = () => {
     const s = q.value.trim().toUpperCase(); if (!s) { sg.innerHTML = ""; return; }
     const hits = SUM.index.filter(x => x.t.toUpperCase().startsWith(s) || (x.n || "").toUpperCase().includes(s)).slice(0, 12);
-    sg.innerHTML = hits.map(x => `<a class="item" href="#stock/${encodeURIComponent(x.t)}">${pill(x.st)}<span style="min-width:0"><span class="t">${esc(x.t)}</span><div class="n">${esc(x.n)}</div></span><span class="r"><b>${fmt(x.c)}</b>${sgn(x.w1)}</span></a>`).join("") || `<p class="note">찾는 종목이 없습니다. 목록에 없는 종목은 저장소의 my_tickers.txt에 추가하세요.</p>`;
+    sg.innerHTML = hits.map(x => `<a class="item" href="#stock/${encodeURIComponent(x.t)}">${pill(x.st)}<span style="min-width:0"><span class="t">${esc(x.t)}</span><div class="n">${capTag(x.cap, x.mc)}${esc(x.n)}</div></span><span class="r"><b>${fmt(x.c)}</b>${sgn(x.w1)}</span></a>`).join("") || `<p class="note">찾는 종목이 없습니다. 목록에 없는 종목은 저장소의 my_tickers.txt에 추가하세요.</p>`;
   };
   q.oninput = run;
   q.onkeydown = e => { if (e.key === "Enter") { const a = $("a", sg); if (a) location.hash = a.getAttribute("href"); } };
@@ -366,7 +379,7 @@ async function viewStock(v, t) {
   v.innerHTML = `${searchBox()}
   <section class="card">
     <div class="row between" style="align-items:flex-start;flex-wrap:nowrap">
-      <div style="min-width:0"><h1 class="mono">${esc(td.t)}</h1><div class="muted" style="font-size:13px">${esc(td.name)}${td.sector ? " · " + esc(td.sector) : ""}</div>
+      <div style="min-width:0"><h1 class="mono">${esc(td.t)}</h1><div class="muted" style="font-size:13px">${esc(td.name)}${td.sector ? " · " + esc(td.sector) : ""}${td.mc ? " · 시총 " + mcTxt(td.mc) : ""}</div>
         <div class="row" style="margin-top:6px">${pill(td.stage, td.label)}${td.signal ? `<span class="pill st2">${esc(td.kind || td.signal)}</span>` : ""}</div></div>
       ${td.score != null ? ring(td.score, 76) : ""}
     </div>

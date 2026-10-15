@@ -105,6 +105,10 @@ def stock_payload(r):
     return d
 
 
+def mcint(x):
+    return int(x) if x is not None and not pd.isna(x) else None
+
+
 def main(fetch=None, universe=None):
     R = S.compute(fetch=fetch or S.fetch_weekly, universe=universe, extra=EXTRA)
     dfs, rows, uni, bench = R["dfs"], R["rows"], R["uni"], R["bench"]
@@ -125,7 +129,9 @@ def main(fetch=None, universe=None):
             continue
         if t in uni and t not in byt and not info.get("mine"):
             continue          # 거래대금·가격 기준에서 걸러진 종목은 앱 데이터에서 뺌
-        payload = dict(t=t, name=str(info.get("name") or names.get(t, t)), cap=info.get("cap"),
+        mc = info.get("mcap")
+        mc = int(mc) if mc is not None and not pd.isna(mc) else None
+        payload = dict(t=t, name=str(info.get("name") or names.get(t, t)), cap=info.get("cap"), mc=mc,
                        sector=S.sector_label(info),
                        w=series_payload(df, b))
         if t in byt:
@@ -139,7 +145,7 @@ def main(fetch=None, universe=None):
             json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
         written.add(safe(t))
         c = df["Close"]
-        index.append(dict(t=t, f=safe(t), n=payload["name"], s=payload.get("sector"), cap=info.get("cap"),
+        index.append(dict(t=t, f=safe(t), n=payload["name"], s=payload.get("sector"), cap=info.get("cap"), mc=mc,
                           sc=payload.get("score"), st=payload.get("stage"), sg=payload.get("signal") or "",
                           c=r2(c.iloc[-1]), w1=r2((c.iloc[-1] / c.iloc[-2] - 1) * 100, 1) if len(c) > 1 else None,
                           k="etf" if t in names else "stock"))
@@ -158,7 +164,7 @@ def main(fetch=None, universe=None):
                          kind="sector" if t in S.SECTOR_ETF.values() else "industry",
                          top=[dict(t=m["ticker"], sc=m["score"]) for m in members[:3]],
                          mem=[[m["ticker"], m["score"], m["stage"], m.get("kind") or m.get("signal") or "", m.get("cap") or "",
-                               r2(m.get("ext"), 0), str(m.get("name") or "")[:28]] for m in members[:150]]))
+                               r2(m.get("ext"), 0), str(m.get("name") or "")[:28], mcint(m.get("mcap"))] for m in members[:150]]))
     order = {2: 0, 1: 1, 3: 2, 4: 3}
     secs.sort(key=lambda s: (order.get(s["stage"], 4), -(s["rs"] if s["rs"] is not None else -99)))
     cands = []
@@ -166,7 +172,7 @@ def main(fetch=None, universe=None):
         if not r["signal"] and r["score"] < 65:
             continue
         d = stock_payload(r)
-        d.update(t=r["ticker"], f=safe(r["ticker"]), n=str(r["name"]), s=r.get("sector_ko"), cap=r.get("cap"), mine=r.get("mine"))
+        d.update(t=r["ticker"], f=safe(r["ticker"]), n=str(r["name"]), s=r.get("sector_ko"), cap=r.get("cap"), mc=mcint(r.get("mcap")), mine=r.get("mine"))
         cands.append(d)
     fx = r2(dfs["KRW=X"]["Close"].iloc[-1], 1) if "KRW=X" in dfs else None
     summary = dict(fx=fx, updated=dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"), day=R["day"],

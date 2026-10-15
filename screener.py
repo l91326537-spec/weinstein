@@ -1248,7 +1248,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
             caps = caps + [f"1→2단계 돌파 +{CFG['b12_pts']}"]
         s["kind"] = kind
         s["stop"], s["stop_pct"] = stop2, (stop2 / s["close"] - 1) * 100
-        s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mine=bool(info.get("mine")),
+        s.update(ticker=t, name=info["name"], score=score, breakdown=bd, caps=caps, cap=info.get("cap"), mcap=info.get("mcap"), mine=bool(info.get("mine")),
                  sector_ko=sector_label(info),
                  sector_etf=etf, sector_stage=sec["stage"] if sec else None,
                  theme_etfs=[e for _, e in info.get("themes") or [] if e], themes=[n for n, _ in info.get("themes") or []],
