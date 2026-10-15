@@ -1339,6 +1339,104 @@ def lev_study(dfs, cal, start, sats):
     return rows, real
 
 
+# ---------------- 횡보장: 박스 아래에서 사고 위에서 팔기 ----------------
+def market_side(dfs, cal, t="^GSPC"):
+    """주별 시장 횡보 판정 (그 주까지의 데이터만): A = 30주선 10주 변화 ±평평 기준 안 또는 15주 동안 30주선을 3번 이상 넘나듦 / B = 주봉 ADX(14) 20 미만"""
+    f = S.indicators(dfs[t])
+    flat = S.CFG["flat_pct"]
+    a = (f["slope"].abs() <= flat) | (f["crosses"] >= S.CFG["whipsaw"])
+    h, l, c = f["high"], f["low"], f["close"]
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    up, dn = h.diff(), -l.diff()
+    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=f.index)
+    mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=f.index)
+    atr = tr.ewm(alpha=1 / 14).mean()
+    pdi, mdi = 100 * pdm.ewm(alpha=1 / 14).mean() / atr, 100 * mdm.ewm(alpha=1 / 14).mean() / atr
+    adx = (100 * (pdi - mdi).abs() / (pdi + mdi)).ewm(alpha=1 / 14).mean()
+    b = adx < 20
+    return a.reindex(cal, method="ffill").fillna(False).astype(bool), b.reindex(cal, method="ffill").fillna(False).astype(bool)
+
+
+def range_signals(frames, start, box=26, lo_zone=0.25, tgt=0.85, min_w=12, max_w=50, max_hold=26):
+    """박스권 매매: 30주선이 평평한 종목(1·3단계), 최근 box주 고가·저가로 박스(폭 min_w~max_w%).
+       금요일 종가가 박스 아래 lo_zone 구간 안 · 박스 아래 끝은 지킴 · 양봉(반등) → 다음 주 시가 매수.
+       손절 = 박스 저점 -3% (장중), 목표 = 박스 아래에서 tgt 지점 (장중 지정가), max_hold주 지나면 종가 매도."""
+    rows = []
+    flat = S.CFG["flat_pct"]
+    for t, f in frames.items():
+        o, h, lo, c, sl, dv = (f[k].values for k in ("open", "high", "low", "close", "slope", "dollar_vol"))
+        hh = f["high"].rolling(box).max().shift(1).values
+        ll = f["low"].rolling(box).min().shift(1).values
+        n, i, idx = len(f), box + 1, f.index
+        while i < n - 1:
+            if idx[i] < start or math.isnan(hh[i]) or math.isnan(sl[i]) or abs(sl[i]) > flat or c[i] < S.CFG["min_price"] \
+                    or (dv[i] if not math.isnan(dv[i]) else 0) < S.CFG["min_dollar_vol"]:
+                i += 1; continue
+            H, L = hh[i], ll[i]
+            w = (H / L - 1) * 100
+            if not (min_w <= w <= max_w) or not (L <= lo[i]) or not (c[i] <= L + lo_zone * (H - L)) or not (c[i] > o[i]):
+                i += 1; continue
+            e, s0, T = o[i + 1], L * 0.97, L + tgt * (H - L)
+            if not (e > s0 > 0) or e >= T:
+                i += 1; continue
+            j, px, why = i + 1, None, None
+            while j < n:
+                if lo[j] <= s0:
+                    px, why = min(s0, o[j]), "박스 이탈 손절"; break
+                if h[j] >= T:
+                    px, why = max(T, o[j]), "박스 위 목표가"; break
+                if j - i >= max_hold:
+                    px, why = c[j], "기간 만료"; break
+                j += 1
+            ex = idx[j] if j < n else None
+            if px is None:
+                px, why = c[-1], "보유 중"
+            rows.append(dict(ticker=t, sig_date=idx[i], entry_date=idx[i + 1], exit_date=ex, entry=e, exit=px, stop0=s0,
+                             R=(px - e) / (e - s0), ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=(j - i - 1) if j < n else n - i - 2,
+                             why=why, score=100.0 - (c[i] - L) / (H - L) * 20, signal="박스", stage_label="", dup=False, width=w))
+            i = j + 1 if j < n else n
+    return pd.DataFrame(rows)
+
+
+def range_study(frames, cal, dfs, start, base_run, ms0, mp, fill, msmall, capmap):
+    """횡보장 전환: 시장 횡보(A·B)일 때 와인스테인 신규 매수 대신 박스권 매매. 반환: (곡선 표 행, 거래 통계 행)"""
+    sideA, sideB = market_side(dfs, cal)
+    sig0, eq0, _ = base_run
+    rs = range_signals(frames, start)
+    print(f"  박스권 신호 {len(rs)}개 · 시장 횡보 비율 A {sideA[sideA.index >= start].mean() * 100:.0f}% · B {sideB[sideB.index >= start].mean() * 100:.0f}%")
+    def on(sd, df):
+        return sd.reindex(df["sig_date"], method="ffill").fillna(False).values.astype(bool)
+    def run(sg):
+        return run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+    rows, trows = [], []
+    rows.append(curve_row("지금 전략 (항상 와인스테인)", "비교 기준", eq0["equity"]))
+    if len(rs):
+        e_r, t_r = run(rs)
+        rows.append(curve_row("박스권 매매만 (항상)", "박스 아래 25% 구간 반등 매수 · 위 85% 목표 · 박스 -3% 손절", e_r["equity"]))
+        for nm, sd in (("A: 30주선 평평·넘나듦", sideA), ("B: ADX 20 미만", sideB)):
+            w = sig0[~on(sd, sig0)]
+            r_ = rs[on(sd, rs)]
+            rows.append(curve_row(f"횡보({nm})면 신규 매수 쉼", "횡보 판정된 주에는 와인스테인 신규 매수 안 함 (보유분은 그대로)", run(w)[0]["equity"]))
+            mix_ = pd.concat([w, r_], ignore_index=True)
+            mix_["score"] = mix_["score"].clip(lower=ms0)
+            rows.append(curve_row(f"횡보({nm})면 박스권 매매로 전환", "추세장 = 와인스테인 · 횡보장 = 박스권 매매 (같은 계좌·같은 종목 수)", run(mix_)[0]["equity"]))
+        cl = rs.copy()
+        cl["sm"] = cl["ticker"].map(capmap) == "소형"
+        a_, b_ = on(sideA, cl), on(sideB, cl)
+        for lab, m in [("박스권 매매 · 전체", np.ones(len(cl), bool)), ("· 시장 횡보(A)일 때", a_), ("· 시장 추세(A 아님)일 때", ~a_),
+                       ("· 시장 횡보(B: ADX<20)일 때", b_), ("· 시장 추세(B 아님)일 때", ~b_),
+                       ("· 대·중형", ~cl["sm"].values), ("· 소형", cl["sm"].values),
+                       ("· 박스 폭 12~25%", (cl["width"] < 25).values), ("· 박스 폭 25~50%", (cl["width"] >= 25).values),
+                       ("· ~2015", (cl["sig_date"] < IMPROVE_SPLIT).values), ("· 2016~", (cl["sig_date"] >= IMPROVE_SPLIT).values)]:
+            st_ = stats_trades(cl[m])
+            trows.append(("[박스권] " + lab, st_))
+            print(f"  [박스권] {lab}: {st_.get('n', 0)}개 · 승률 {f_(st_.get('win'))}% · 평균 {f_(st_.get('ret'))}% · {f_(st_.get('avgR'), 2)}R")
+    for r in rows:
+        print(f"  [횡보 전환] {r['name']}: 연평균 {f_(r['c'].get('cagr'))}% · 최대낙폭 {f_(r['c'].get('mdd'))}% · 앞 {f_(r['a'].get('cagr'))}% · 뒤 {f_(r['b'].get('cagr'))}%")
+    return rows, trows
+
+
 # ---------------- QQQ 진입 시점 (장기 보유용) ----------------
 def qqq_entry_study(dfs, start, etf="QQQ"):
     """start 이후 매주를 '돈이 생긴 주'로 보고, 진입 방식별로 3년·5년 뒤 평가액을 '바로 한 번에'와 비교.
@@ -1527,6 +1625,11 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        rrows, rtrows = range_study(frames, cal, dfs, start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
+        lev[0].extend(rrows)
+    except Exception as ex:
+        print("  횡보 전환 비교 실패:", ex); rtrows = []
     curves = {"전략": eq["equity"]}
     for b in ("SPY", "QQQ"):
         if b in dfs:
@@ -1651,6 +1754,7 @@ def main(argv=None, fetch=None, universe=None):
                 buckets.append(("[30주선 회복] " + lab, st_))
                 print(f"  [30주선 회복] {nm if lab.startswith('·') else ''}{lab}: {st_.get('n', 0)}개 · 승률 {f_(st_.get('win'))}% · 평균 {f_(st_.get('ret'))}% · {f_(st_.get('avgR'), 2)}R")
     buckets.extend(beta_rows)
+    buckets.extend(rtrows)
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
     yearly = pd.DataFrame({k: v.resample("YE").last().pct_change() * 100 for k, v in curves.items()})
     first = {k: (v.resample("YE").last().iloc[0] / v.iloc[0] - 1) * 100 for k, v in curves.items()}
