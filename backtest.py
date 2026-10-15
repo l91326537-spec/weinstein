@@ -367,6 +367,59 @@ def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap)
     return rows
 
 
+def crash_study(frames, start, capmap, earn):
+    """2단계 종목이 한 주에 -10% 이상 급락(거래량 1.5배+)한 뒤: 그 주 종가가 30주선을 지켰는지에 따라 이후 수익률.
+       실적 발표 주(그 주 안에 실적일) 여부도 나눔. 기준선: 2단계 종목의 아무 주."""
+    ev, base = [], []
+    hz = (4, 13, 26, 52)
+    for t, f in frames.items():
+        if capmap.get(t) == "소형":
+            continue
+        c, ma, st, vr, idx = f["close"].values, f["ma30"].values, f["stage"].values, f["vr"].values, f.index
+        n = len(f)
+        ds = earn.get(t)
+        last = -99
+        for i in range(1, n - 1):
+            if idx[i] < start or st[i - 1] != 2 or math.isnan(ma[i]):
+                continue
+            wk = c[i] / c[i - 1] - 1
+            fwd = [(c[i + h] / c[i] - 1) * 100 if i + h < n else np.nan for h in hz]
+            if i % 4 == 0:
+                base.append(fwd)
+            if wk > -0.10 or (vr[i] if not math.isnan(vr[i]) else 0) < 1.5 or i - last < 13:
+                continue
+            last = i
+            held = c[i] >= ma[i]
+            e = np.nan
+            if ds is not None and len(ds):
+                k = ds.searchsorted(idx[i] - pd.Timedelta(days=8))
+                e = float(k < len(ds) and ds[k] <= idx[i])
+            brk13 = bool((c[i + 1:min(n, i + 14)] < ma[i + 1:min(n, i + 14)] * 0.97).any())
+            ev.append(dict(held=held, earn=e, drop=wk * 100, brk13=brk13, cap=capmap.get(t), **{f"r{h}": v for h, v in zip(hz, fwd)}))
+    ev = pd.DataFrame(ev)
+    b = pd.DataFrame(base, columns=[f"r{h}" for h in hz])
+    def line(lab, d):
+        if not len(d):
+            print(f"  [급락 후] {lab}: 0건"); return
+        med = " · ".join(f"{h}주 {d[f'r{h}'].median():+.1f}%" for h in hz)
+        win = (d["r26"] > 0).mean() * 100
+        extra = f" · 13주 안 30주선 -3% 이탈 {d['brk13'].mean() * 100:.0f}%" if "brk13" in d else ""
+        print(f"  [급락 후] {lab}: {len(d)}건 · 중앙값 {med} · 26주 뒤 오른 비율 {win:.0f}%{extra}")
+    line("기준: 2단계 대·중형주 아무 주", b)
+    if len(ev):
+        line("2단계 대·중형 주간 -10%+ 급락 (거래량 1.5배+) 전체", ev)
+        line("· 그 주 종가가 30주선 위 (지킴)", ev[ev["held"]])
+        line("· 그 주 종가가 30주선 아래 (깨짐)", ev[~ev["held"]])
+        line("· 실적 발표 주 급락 · 30주선 지킴", ev[(ev["earn"] == 1) & ev["held"]])
+        line("· 실적 발표 주 급락 · 30주선 깨짐", ev[(ev["earn"] == 1) & ~ev["held"]])
+        line("· 실적 아닌 급락 · 30주선 지킴", ev[(ev["earn"] == 0) & ev["held"]])
+        line("· 30주선 지킴 · 급락 -10~-15%", ev[ev["held"] & (ev["drop"] > -15)])
+        line("· 30주선 지킴 · 급락 -15% 이상", ev[ev["held"] & (ev["drop"] <= -15)])
+        h_ = ev[ev["held"]]
+        line("· 30주선 지킴 · 이후 13주 안 30주선 안 깨짐", h_[~h_["brk13"]])
+        line("· 30주선 지킴 · 이후 13주 안 30주선 깨짐", h_[h_["brk13"]])
+
+
 def _bounce(f, i, quiet):
     """30주선 부근 반등: 최근 3주 안에 30주선 +3% 이내까지 눌렸다가, 이번 주 거래량 늘며 양봉으로 반등 (지난주보다 높게 마감)"""
     o, l, c, ma, vr, st, sl = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values, f["vr"].values, f["stage"].values, f["slope"].values
@@ -1627,6 +1680,10 @@ def main(argv=None, fetch=None, universe=None):
         return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=10)
     q = F("QQQ")
     capmap = {t: v.get("cap") for t, v in uni.items()}
+    try:
+        crash_study(frames, start, capmap, fetch_earnings(sorted(t for t in frames if capmap.get(t) != "소형")))
+    except Exception as ex:
+        print("  급락 후 분석 실패:", ex)
     CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
     ATRV = dict(atr=True)
     OUT = dict(out=True)
