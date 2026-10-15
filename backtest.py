@@ -296,6 +296,39 @@ def reclaim_study(frames, start, capmap, maxk=8):
     return pd.DataFrame(rows)
 
 
+def big_winner_study(allsig, at, capmap, buckets):
+    """큰 수익(3R+, 5R+) 거래와 나머지 거래의 특징 비교 (신호 시점 값)"""
+    d = allsig.copy()
+    d["rs_"], d["ext_"], d["mkt_"], d["sec_"], d["vr_"] = at("rs"), at("ext"), at("mkt"), at("sec_stage"), at("vr")
+    d["stop_pct"] = (d["entry"] - d["stop0"]) / d["entry"] * 100
+    d["cap_"] = d["ticker"].map(capmap).fillna("기타")
+    big, huge = d["R"] >= 3, d["R"] >= 5
+    print(f"  [큰 수익] 전체 {len(d)}건 · 3R+ {big.sum()}건 ({big.mean() * 100:.1f}%) · 5R+ {huge.sum()}건 ({huge.mean() * 100:.1f}%) · "
+          f"3R+ 평균 보유 {d.loc[big, 'weeks'].mean():.0f}주 · 평균 수익 {d.loc[big, 'ret'].mean():.0f}%")
+    for nm, col in (("RS", "rs_"), ("30주선 이격 %", "ext_"), ("신호 주 거래량 배수", "vr_"), ("돌파 매수 주 거래량 배수", "evr"),
+                    ("기저 길이(주)", "bl"), ("30주선 상승 주수", "upw"), ("30주선 52주 상승률 %", "rise"), ("52주 고점 대비 %", "dd"),
+                    ("점수", "score"), ("52주 30주선 이탈 횟수", "x52"), ("손절폭 %", "stop_pct")):
+        a_, b_ = d.loc[big, col].dropna(), d.loc[~big, col].dropna()
+        if len(a_) and len(b_):
+            print(f"  [큰 수익] {nm}: 3R+ 중앙값 {a_.median():.1f} · 나머지 {b_.median():.1f} · 5R+ {d.loc[huge, col].median():.1f}")
+    def share(lab, m):
+        m = m.fillna(False).astype(bool)
+        st = stats_trades(d[m])
+        buckets.append(("[큰 수익] " + lab, st))
+        print(f"  [큰 수익] {lab}: {m.sum()}건 · 3R+ 비율 {big[m].mean() * 100:.1f}% · 5R+ {huge[m].mean() * 100:.1f}% · 평균 {f_(st.get('avgR'))}R")
+    for cp in ("대형", "중형", "소형"):
+        share(f"{cp}주", d["cap_"] == cp)
+    share("시장 2단계일 때", d["mkt_"] == 2); share("시장 2단계 아닐 때", d["mkt_"] != 2)
+    share("업종 2단계일 때", d["sec_"] == 2); share("업종 2단계 아닐 때", d["sec_"] != 2)
+    share("돌파 신호", d["signal"] == "돌파"); share("풀백 신호", d["signal"] == "풀백")
+    share("1→2단계 돌파", d["kind"] == "B12"); share("2단계 중간 돌파", d["kind"] == "B2")
+    share("RS 10 이상", d["rs_"] >= 10); share("RS 0~10", (d["rs_"] >= 0) & (d["rs_"] < 10)); share("RS 0 미만", d["rs_"] < 0)
+    share("손절폭 5% 이하", d["stop_pct"] <= 5); share("손절폭 5~10%", (d["stop_pct"] > 5) & (d["stop_pct"] <= 10)); share("손절폭 10% 초과", d["stop_pct"] > 10)
+    share("대·중형 · 기저 26주+ · 돌파 거래량 2배+ · RS 0+",
+          (d["cap_"] != "소형") & (d["bl"] >= 26) & (d["evr"] >= 2) & (d["rs_"] >= 0) & d["kind"].isin(["B12", "B2"]))
+    share("대·중형 · 시장·업종 모두 2단계 · RS 0+", (d["cap_"] != "소형") & (d["mkt_"] == 2) & (d["sec_"] == 2) & (d["rs_"] >= 0))
+
+
 def _bounce(f, i, quiet):
     """30주선 부근 반등: 최근 3주 안에 30주선 +3% 이내까지 눌렸다가, 이번 주 거래량 늘며 양봉으로 반등 (지난주보다 높게 마감)"""
     o, l, c, ma, vr, st, sl = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values, f["vr"].values, f["stage"].values, f["slope"].values
@@ -1674,6 +1707,10 @@ def main(argv=None, fetch=None, universe=None):
                    ("[갭] 월요일 시가가 지난주 종가보다 2%+ 갭하락 뒤 돌파", bk2["gap"] == "down"), ("[갭] 갭 없이 주중 돌파", bk2["gap"] == "normal")]:
         buckets.append((lab, stats_trades(bk2[m])))
     allsig["sm"] = allsig["ticker"].map(capmap) == "소형"
+    try:
+        big_winner_study(allsig, at, capmap, buckets)
+    except Exception as ex:
+        print("  큰 수익 종목 특징 분석 실패:", ex)
     pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
     def es_row(lab, pairs):
