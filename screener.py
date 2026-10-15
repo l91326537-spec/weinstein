@@ -7,7 +7,7 @@
 실행: python screener.py            (전체)
       python screener.py --quick    (나스닥100 + 내 종목만, 빠른 확인용)
 """
-import argparse, datetime as dt, html, io, json, math, os, sys, time
+import argparse, datetime as dt, html, io, json, math, os, re, sys, time
 
 import numpy as np
 import pandas as pd
@@ -155,7 +155,7 @@ THEME_LIST = {
 }
 # 나스닥 업종이 실제 사업과 다른 종목의 대표 업종 고치기
 THEME_FIX = {"GE": ("항공우주·방산", "ITA"), "ETN": ("전력망·전기장비", "GRID"), "GEV": ("전력망·전기장비", "GRID"),
-             "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None)}
+             "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None), "POOL": ("소매", "XRT")}
 
 
 def sector_label(info):
@@ -188,6 +188,11 @@ def themes_for(tk, industry=None, mcap=None):
     return out
 
 
+NASDAQ_SECTOR = {"Technology": "Information Technology", "Finance": "Financials", "Basic Materials": "Materials",
+                 "Telecommunications": "Communication Services"}
+_NOT_COMMON = re.compile(r"preferred|depositary shares? represent|% |notes due|warrant|subordinated|debenture|\bunits?\b|\brights?\b|"
+                         r"fixed-to-floating|cumulative|\betf\b|\bfund\b|closed end", re.I)
+
 def _nasdaq_screener():
     """나스닥 스크리너: 미국 상장 전 종목의 시총·업종 (한 번에 받음)"""
     import requests
@@ -204,7 +209,7 @@ def _nasdaq_screener():
             mc = float(str(x.get("marketCap") or "").replace(",", "") or "nan")
         except ValueError:
             mc = float("nan")
-        out.append((tk, mc, str(x.get("industry") or "").strip(), str(x.get("sector") or "").strip()))
+        out.append((tk, mc, str(x.get("industry") or "").strip(), str(x.get("sector") or "").strip(), str(x.get("name") or "").strip()))
     if len(out) < 3000:
         raise ValueError(f"종목 수가 너무 적음 ({len(out)})")
     return out
@@ -388,7 +393,7 @@ def refresh_universe():
         print(log[-1])
     try:
         rows = _nasdaq_screener()
-        pd.DataFrame(rows, columns=["ticker", "mcap", "industry", "nsector"]).to_csv(os.path.join(UNI_DIR, "industry.csv"), index=False)
+        pd.DataFrame(rows, columns=["ticker", "mcap", "industry", "nsector", "name"]).to_csv(os.path.join(UNI_DIR, "industry.csv"), index=False)
         log.append(f"industry: {len(rows)}종목 시총·업종 저장")
     except Exception as e:
         log.append(f"industry: 받지 못함 ({type(e).__name__}: {e}) — 기존 목록 유지")
@@ -442,8 +447,19 @@ def load_universe(quick=False):
     ind = {}
     ipath = os.path.join(UNI_DIR, "industry.csv")
     if os.path.exists(ipath):
-        for tk, mc, nm, _ in pd.read_csv(ipath).values.tolist():
-            ind[str(tk)] = (mc, nm if isinstance(nm, str) else "")
+        idf = pd.read_csv(ipath)
+        for r in idf.itertuples(index=False):
+            ind[str(r.ticker)] = (r.mcap, r.industry if isinstance(r.industry, str) else "")
+        # 지수 목록에 없는 미국 상장 시총 2조원+ 종목도 추가 (러셀1000에만 있는 종목, 지수에서 빠진 종목 등)
+        if "name" in idf.columns and not quick:
+            n0 = len(uni)
+            for r in idf.itertuples(index=False):
+                tk, nm = str(r.ticker), str(r.name if isinstance(r.name, str) else "")
+                if tk in uni or pd.isna(r.mcap) or r.mcap < THEME_MIN_MCAP or not re.match(r"^[A-Z]{1,5}(-[A-Z])?$", tk) or _NOT_COMMON.search(nm):
+                    continue
+                uni[tk] = {"name": nm or tk, "sector": NASDAQ_SECTOR.get(r.nsector, r.nsector if r.nsector in SECTOR_ETF else None),
+                           "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형"}
+            print(f"  나스닥 시총 2조원+ 추가: {len(uni) - n0}종목")
     for tk, info in uni.items():
         mc, nm = ind.get(tk, (None, ""))
         info["mcap"], info["industry"] = mc, nm
