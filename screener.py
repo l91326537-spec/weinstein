@@ -52,6 +52,11 @@ CFG = {
     "breakout_stop_pct": 5.0,  # 돌파 매수 시 손절폭 (매수가 대비 %)
     "breakout_chase_pct": 7.0, # 돌파 지점보다 이 % 넘게 올라가 있으면 '돌파 매수'로 보지 않음 (추격 금지)
     "min_stop_pct": 3.0,       # 손절은 매수가보다 최소 이만큼 아래
+    "use_supply": False,       # 바로 위(supply_room % 안)에 2년 내 전고점 매물이 쌓인 종목 감점 (백테스트 결과로 결정)
+    "supply_room": 10.0,       # 지금가 위 이 % 안에 있는 전고점을 '가까운 매물'로 봄
+    "supply_weeks": 3,         # 그 구간에 고가가 걸린 주가 이 수 이상이면 매물이 쌓였다고 봄
+    "supply_pts": 8,           # 감점 크기
+    "use_event_vol": True,     # 최근 90일 안에 인수합병·주식교환·공개매수 공시(SEC)가 있으면 거래량을 수요로 치지 않음
 }
 
 SECTOR_ETF = {  # GICS 섹터 → SPDR 섹터 ETF
@@ -604,6 +609,19 @@ def indicators(df):
     # 볼린저 수축: 최근 8주 안에 20주 밴드 폭이 지난 52주 중 하위 25%까지 좁아졌음
     bbw = 4 * c.rolling(20).std() / c.rolling(20).mean()
     f["squeeze"] = (bbw.rolling(8).min() <= bbw.rolling(52, min_periods=40).quantile(0.25)).astype(float)
+    # 위쪽 매물: 지난 2년 고점까지 거리(room, %), 지금가~+N% 구간에 고가가 걸린 주 수(sup_n),
+    # 큰 하락(-35%+) 뒤 26주+ 기저(deep) = 매물이 오래 소화된 종목 → 감점 제외
+    hi104 = h.shift(1).rolling(104, min_periods=52).max()
+    f["room"] = (hi104 / c - 1) * 100
+    hv_, cv_, n_ = h.values.astype(float), c.values.astype(float), len(c)
+    supn = np.full(n_, np.nan)
+    if n_ > 104:
+        from numpy.lib.stride_tricks import sliding_window_view
+        W = sliding_window_view(hv_[:-1], 104)                  # i주 직전 104주 고가 (i = 104 … n-1)
+        cc = cv_[104:][:, None]
+        supn[104:] = ((W >= cc) & (W <= cc * (1 + CFG["supply_room"] / 100))).sum(axis=1)
+    f["sup_n"] = supn
+    f["deep"] = ((l.rolling(78, min_periods=26).min() <= hi104 * 0.65) & (f["base_len"] >= 26)).astype(float)
     f["pinned"] = ((h.rolling(8).max() / l.rolling(8).min() - 1 <= 0.07) & (atrp <= 0.03) & (atrp <= prev * 0.45) & jump).astype(float)
     return f
 
@@ -664,7 +682,7 @@ def quality_adj(s, signal=None):
     백테스트(2006~, 신호 약 5만 개): 최근 30주선 이탈 뒤 풀백 1.33R vs 1.72R, 헤드앤숄더 천장 뒤 신호 0.78R vs 1.55R,
     역헤드앤숄더 돌파 1.39R vs 그 외 1.40R(차이 없음), 30주선 기울기 약한 풀백 1.60R vs 1.61R(차이 없음)
     백테스트(신호 5만여 개) 근거: 2단계 후반 신호 평균 1.44R vs 아닌 신호 1.62R, 돌파 중 기저 26주+ 1.54R vs 짧은 기저 1.10R"""
-    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, rebrk=0, chop=0, dump=0, pinned=bool(s.get("pinned")), notes=[])
+    out = dict(late=0, base=0, trend=0, pat=0, ovh=0, rebrk=0, chop=0, dump=0, sup=0, pinned=bool(s.get("pinned")), notes=[])
     if out["pinned"]:
         out["notes"].append("인수합병 의심 (가격 고정) · 상한 20")
         return out
@@ -673,6 +691,15 @@ def quality_adj(s, signal=None):
         if CFG["squeeze_pts"]:
             out["sqz"] = CFG["squeeze_pts"]
             out["notes"].append(f"볼린저 수축 뒤 신호 +{CFG['squeeze_pts']}")
+    rm, sn = s.get("room"), s.get("sup_n")
+    if s.get("stage") in (1, 2) and rm is not None and not pd.isna(rm) and 0 < rm <= CFG["supply_room"] and (sn or 0) >= CFG["supply_weeks"]:
+        if s.get("deep"):
+            if CFG["use_supply"]:
+                out["notes"].append(f"위 {rm:.0f}% 안 전고점 매물 · 큰 하락 뒤 긴 기저라 감점 없음")
+        else:
+            out["sup"] = -CFG["supply_pts"]
+            if CFG["use_supply"]:
+                out["notes"].append(f"위 {rm:.0f}% 안에 2년 내 전고점 매물 ({int(sn)}주) -{CFG['supply_pts']}")
     if s.get("stage") != 2:
         return out
     if late_stage(s):
@@ -730,7 +757,7 @@ def apply_quality(score, q, use_late=True, use_base=True):
     if q["pinned"]:
         return min(score, 20)
     return int(max(0, min(100, score + (q["late"] if use_late else 0) + (q["base"] if use_base else 0) + q.get("trend", 0) + q.get("pat", 0) + q.get("ovh", 0) + q.get("rebrk", 0) + q.get("sqz", 0)
-                               + (q.get("chop", 0) if CFG["use_chop"] else 0) + (q.get("dump", 0) if CFG["use_dump"] else 0))))
+                               + (q.get("chop", 0) if CFG["use_chop"] else 0) + (q.get("dump", 0) if CFG["use_dump"] else 0) + (q.get("sup", 0) if CFG["use_supply"] else 0))))
 
 
 def classify(r):
@@ -1092,6 +1119,60 @@ def write_report(day, mk, sectors, rows, dfs):
 
 
 # ---------------- 메인 ----------------
+# ---------------- 이벤트성 거래량 (SEC 공시) ----------------
+# 인수합병·주식교환·공개매수 때 생기는 거래량은 차익거래·지수 조정 물량이라 '수요'가 아님
+EVENT_FORMS = {"425", "S-4", "SC TO-T", "SC TO-I", "SC 14D9", "SC 13E3", "DEFM14A", "PREM14A", "DEFM14C", "PREM14C"}
+SEC_UA = os.environ.get("SEC_UA") or "weinstein-screener/1.0 (github.com/l91326537-spec/weinstein)"
+_SEC = {"cik": None, "ok": True, "cache": {}}
+
+
+def _sec_json(url):
+    import requests
+    r = requests.get(url, headers={"User-Agent": SEC_UA, "Accept-Encoding": "gzip, deflate"}, timeout=20)
+    time.sleep(0.12)                      # SEC 요청 한도 (초당 10회) 아래로
+    r.raise_for_status()
+    return r.json()
+
+
+def sec_events(tk, full=False):
+    """종목의 인수합병·주식교환·공개매수 관련 SEC 공시 [(날짜, 서류)]. 접속 실패하면 None (그땐 거르지 않음)"""
+    if not _SEC["ok"]:
+        return None
+    if tk in _SEC["cache"]:
+        return _SEC["cache"][tk]
+    try:
+        if _SEC["cik"] is None:
+            d = _sec_json("https://www.sec.gov/files/company_tickers.json")
+            _SEC["cik"] = {v["ticker"].upper().replace(".", "-"): int(v["cik_str"]) for v in d.values()}
+        cik = _SEC["cik"].get(tk.upper())
+        if not cik:
+            _SEC["cache"][tk] = []
+            return []
+        d = _sec_json(f"https://data.sec.gov/submissions/CIK{cik:010d}.json")
+        parts = [d["filings"]["recent"]]
+        if full:
+            parts += [_sec_json("https://data.sec.gov/submissions/" + x["name"]) for x in d["filings"].get("files", [])]
+        out = sorted((dd, fm) for p in parts for fm, dd in zip(p.get("form", []), p.get("filingDate", []))
+                     if fm.replace("/A", "").strip() in EVENT_FORMS)
+    except Exception as ex:
+        if _SEC["cik"] is None or "403" in str(ex):
+            print("  SEC 공시 확인 실패 → 이벤트 거래량 거르기 건너뜀:", ex)
+            _SEC["ok"] = False
+        return None
+    _SEC["cache"][tk] = out
+    return out
+
+
+def recent_event(tk, day=None, days=90):
+    """최근 days일 안의 이벤트 공시 하나 (날짜, 서류) 또는 None"""
+    ev = sec_events(tk)
+    if not ev:
+        return None
+    day = pd.Timestamp(day or dt.date.today())
+    hit = [e for e in ev if 0 <= (day - pd.Timestamp(e[0])).days <= days]
+    return hit[-1] if hit else None
+
+
 def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
     """데이터 받기 + 시장·업종·종목 계산 (리포트·앱 공통)"""
     day = dt.date.today().isoformat()
@@ -1132,6 +1213,14 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
             continue
         b = bench.get(info["bench"])
         s["rs"], s["rs4"] = mansfield(df["Close"], b) if b is not None else (None, None)
+        ev = None
+        if CFG["use_event_vol"] and info["bench"] == "us" and s["stage"] in (1, 2) and \
+                max(s.get("vr") or 0, (s.get("brk_vr") or 0) if s.get("brk_week") else 0) >= 2:
+            ev = recent_event(t)
+            if ev:                       # 이벤트 거래량은 1배로 보고 계산 (돌파 신호도 거래량 조건을 다시 봄)
+                s["vr"] = min(s["vr"], 1.0)
+                if s.get("brk_vr") is not None and not pd.isna(s["brk_vr"]):
+                    s["brk_vr"] = min(s["brk_vr"], 1.0)
         etf = MYSECTOR_ETF.get(info.get("mysector") or "")
         if not etf or etf not in sectors:
             etf = SECTOR_ETF.get(info.get("sector") or "")
@@ -1148,6 +1237,8 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
                        or "30주선" in n or "헤드앤숄더" in n or "매물" in n or "재돌파" in n or "들락날락" in n or "급락" in n or "볼린저" in n]
         if q["pinned"]:
             sig2 = ""
+        if ev:
+            caps = caps + [f"이벤트성 거래량 의심 ({ev[0]} SEC {ev[1]} 공시 · 인수합병/주식교환) · 거래량 점수 제외"]
         if not ADR_BUY and info.get("src") in ("adr", "adr_mid") and not info.get("mine") and sig2:
             sig2 = ""                 # 백테스트: 해외 ADR을 넣으면 연평균 15.4% → 12.1% (신호 평균 1.5R vs 지수 종목 2.7R) → 매수 신호는 끔
             caps = caps + ["해외 ADR · 매수 신호 제외 (백테스트상 성과 저조)"]

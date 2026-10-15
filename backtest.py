@@ -72,12 +72,12 @@ def build_frames(dfs, uni):
             f["sec_stage"], f["sec_rs"] = np.nan, np.nan
         scores, sigs, scores2, sigs2 = [], [], [], []
         qL, qB, qP, qT, qPt = [], [], [], [], []
-        qC, qD, qS = [], [], []
+        qC, qD, qS, qSu = [], [], [], []
         ddv = f["dd52"].values
         isb = []
         for _, r in f.iterrows():
             if pd.isna(r["stage"]) or pd.isna(r["rs"]):
-                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); qS.append(0); continue
+                scores.append(np.nan); sigs.append(""); scores2.append(np.nan); sigs2.append(""); qL.append(0); qB.append(0); qP.append(False); qT.append(0); qPt.append(0); isb.append(False); qC.append(0); qD.append(0); qS.append(0); qSu.append(0); continue
             d = S.row_dict(r)
             d["stage"] = int(r["stage"])
             ss = None if pd.isna(r["sec_stage"]) else int(r["sec_stage"])
@@ -97,7 +97,7 @@ def build_frames(dfs, uni):
             q = S.quality_adj(d, g2)
             qL.append(1 if q["late"] else 0); qB.append(0 if not q["base"] else (1 if q["base"] > 0 else -1)); qP.append(q["pinned"])
             qT.append(q.get("trend", 0)); qPt.append(q.get("pat", 0)); isb.append(g2 == "돌파")
-            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(1 if q.get("sqz_on") else 0)
+            qC.append(q.get("chop", 0)); qD.append(q.get("dump", 0)); qS.append(1 if q.get("sqz_on") else 0); qSu.append(q.get("sup", 0))
         f["score1"], f["signal1"], f["score2"], f["signal2"] = scores, sigs, scores2, sigs2
         L, B, P = np.array(qL, float), np.array(qB, float), np.array(qP, bool)
         s2 = f["score2"].values
@@ -109,8 +109,11 @@ def build_frames(dfs, uni):
         ovp = np.where(np.array(isb), 0, ov)
         f["sqz_on"] = np.array(qS, float)              # 볼린저 수축 뒤 돌파·풀백 (가점 크기와 무관)
         cur = base + T + Pt + f["sqz_on"].values * S.CFG["squeeze_pts"]      # 볼린저 수축 가점 (앱 점수와 같게)
-        C, D = np.array(qC, float), np.array(qD, float)
-        for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D)):
+        C, D, Su = np.array(qC, float), np.array(qD, float), np.array(qSu, float)
+        if S.CFG["use_supply"]:
+            cur = cur + Su                      # 앱과 같게
+        for name, a in (("TPt", cur), ("C", cur + C), ("D", cur + D), ("CD", cur + C + D),
+                        ("TPtS", cur if S.CFG["use_supply"] else cur + Su), ("TPtS0", cur - Su if S.CFG["use_supply"] else cur)):
             v = np.clip(s2 + a, 0, 100)
             f["score2" + name] = np.where(P, np.minimum(v, 20), v)
         frames[t] = f
@@ -358,6 +361,55 @@ def big_winner_study(allsig, at, capmap, buckets):
     share("시장 약할 때 · 베타 1.3 이상", weak & (d["beta_"] >= 1.3))
     share("시장 약할 때 · 그 외 업종 · 대·중형 · RS 0+", weak & ~dfn & (d["cap_"] != "소형") & (d["rs_"] >= 0))
     share("시장 2단계 · 방어 업종", ~weak & dfn); share("시장 2단계 · 그 외 업종", ~weak & ~dfn)
+
+
+def supply_study(frames, cal, base_run, sig_s, sig_s0, ms0, mp, fill, msmall, capmap, allsig, at, buckets):
+    """위쪽 전고점 매물: 신호별 성과 + 감점 넣고/빼고 포트폴리오 비교. 반환: 곡선 표 행"""
+    d = allsig
+    d["room_"], d["supn_"], d["deep_"] = at("room"), at("sup_n"), at("deep")
+    lg = d["ticker"].map(capmap) != "소형"
+    near = (d["room_"] > 0) & (d["room_"] <= S.CFG["supply_room"])
+    dense = d["supn_"] >= S.CFG["supply_weeks"]
+    for nm, sel in (("돌파", d["kind"].isin(["B12", "B2"])), ("풀백", d["signal"] == "풀백"), ("전체", d["signal"] != "")):
+        sel = sel & lg
+        for lab, m in (("신고가권 (2년 고점 위)", d["room_"] <= 0), ("위 0~5%에 전고점", (d["room_"] > 0) & (d["room_"] <= 5)),
+                       ("위 5~10%", (d["room_"] > 5) & (d["room_"] <= 10)), ("위 10~20%", (d["room_"] > 10) & (d["room_"] <= 20)),
+                       ("위 20%+", d["room_"] > 20),
+                       (f"위 10% 안 매물 {S.CFG['supply_weeks']}주+ (감점 대상)", near & dense & (d["deep_"] != 1)),
+                       ("위 10% 안 매물 · 큰 하락 뒤 긴 기저 (감점 제외)", near & dense & (d["deep_"] == 1)),
+                       ("위 10% 안 매물 1~2주", near & ~dense)):
+            st = stats_trades(d[sel & m])
+            buckets.append((f"[전고점 매물] {nm} · {lab} (대·중형)", st))
+            print(f"  [전고점 매물] {nm} · {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    rows = []
+    for nm, sg in (("감점 없음", sig_s0), (f"감점 -{S.CFG['supply_pts']}", sig_s)):
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[전고점 매물] {nm}", f"위 {S.CFG['supply_room']:.0f}% 안 2년 내 전고점 {S.CFG['supply_weeks']}주+ · 큰 하락 뒤 긴 기저 제외 · 거래 {len(t_)}건", e_["equity"]))
+        print(f"  {rows[-1]['name']}: 연평균 {f_(rows[-1]['c'].get('cagr'))}% · 최대낙폭 {f_(rows[-1]['c'].get('mdd'))}%")
+    return rows
+
+
+def event_study(allsig, capmap, buckets, days=90):
+    """돌파 매수 주 거래량이 큰(2배+) 대·중형 돌파 중, 직전 90일 안에 인수합병·주식교환·공개매수 공시가 있던 것 vs 없던 것"""
+    d = allsig[allsig["kind"].isin(["B12", "B2"]) & (allsig["ticker"].map(capmap) != "소형") & (allsig["evr"] >= 2)].copy()
+    tks = sorted(set(d["ticker"]))
+    print(f"  [이벤트 거래량] SEC 공시 확인 {len(tks)}종목...")
+    evs = {}
+    for i, t in enumerate(tks):
+        e = S.sec_events(t, full=True)
+        if e is None and not S._SEC["ok"]:
+            print("  [이벤트 거래량] SEC 접속 실패 → 건너뜀")
+            return
+        evs[t] = [pd.Timestamp(x[0]) for x in (e or [])]
+        if (i + 1) % 200 == 0:
+            print(f"    {i + 1}/{len(tks)}")
+    def hit(t, dd):
+        return any(0 <= (dd - x).days <= days for x in evs.get(t, []))
+    d["ev"] = [hit(t, dd) for t, dd in zip(d["ticker"], d["entry_date"])]
+    for lab, m in (("공시 있음 (이벤트 거래량 의심)", d["ev"]), ("공시 없음", ~d["ev"])):
+        st = stats_trades(d[m])
+        buckets.append((f"[이벤트 거래량] 거래량 2배+ 돌파 · 직전 {days}일 {lab} (대·중형)", st))
+        print(f"  [이벤트 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
 
 
 def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap):
@@ -1918,6 +1970,16 @@ def main(argv=None, fetch=None, universe=None):
         big_winner_study(allsig, at, capmap, buckets)
     except Exception as ex:
         print("  큰 수익 종목 특징 분석 실패:", ex)
+    try:
+        kw_i = dict(SK[sk_i], **base_kw)
+        lev[0].extend(supply_study(frames, cal, runs[ib], CV(**dict(kw_i, score_col="score2TPtS")), CV(**dict(kw_i, score_col="score2TPtS0")),
+                                   args.min_score, mp_i, fill_i, ms_i, capmap, allsig, at, buckets))
+    except Exception as ex:
+        print("  전고점 매물 분석 실패:", ex)
+    try:
+        event_study(allsig, capmap, buckets)
+    except Exception as ex:
+        print("  이벤트 거래량 분석 실패:", ex)
     pb, bk = allsig["signal"] == "풀백", allsig["signal"] == "돌파"
     late = (allsig["upw"] >= S.CFG["late_weeks"]) | (allsig["rise"] >= S.CFG["late_rise"])
     def es_row(lab, pairs):
