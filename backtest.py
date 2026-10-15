@@ -252,6 +252,50 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
     return (f.index[j0], None, e, c[-1], (c[-1] - e) / risk, len(f) - 1 - j0, "보유 중", s0)
 
 
+def reclaim_study(frames, start, capmap, maxk=8):
+    """30주선 아래로 1~maxk주 마감했다가 다시 위로 올라선 주에 매수. 손절 = 이탈 기간 최저가 -1%, 금요일 종가 손절 + 비상 -3%, 4단계까지 보유.
+       close = 회복한 주 금요일 종가 매수 / intra = 그 주 장중 30주선 돌파 때 매수(그 주 종가가 다시 30주선 아래여도 산 것으로 침)"""
+    rows = []
+    for t, f in frames.items():
+        o, h, lo, c, ma = (f[k].values for k in ("open", "high", "low", "close", "ma30"))
+        sl, rs, dv = f["slope"].values, f["rs"].values, f["dollar_vol"].values
+        n = len(f)
+        busy = {"close": -1, "intra": -1}
+        for i in range(maxk + 2, n - 1):
+            if f.index[i] < start or math.isnan(ma[i]) or not (c[i - 1] < ma[i - 1]):
+                continue
+            k = 0
+            while k < maxk + 1 and c[i - 1 - k] < ma[i - 1 - k]:
+                k += 1
+            if k == 0 or k > maxk or math.isnan(ma[i - 1 - k]) or not (sl[i - 1 - k] > 0):   # 이탈 전에는 30주선 위 · 30주선 상승 중이던 종목만
+                continue
+            if c[i] < S.CFG["min_price"] or (dv[i] if not math.isnan(dv[i]) else 0) < S.CFG["min_dollar_vol"]:
+                continue
+            low_k = np.nanmin(lo[i - k:i + 1])
+            for mode in ("close", "intra"):
+                if i <= busy[mode]:
+                    continue
+                if mode == "close":
+                    if not (c[i] > ma[i]):
+                        continue
+                    e, j0, part = c[i], i + 1, False
+                else:
+                    if not (h[i] > ma[i]):
+                        continue
+                    e, j0, part = max(o[i], ma[i]), i, True
+                s0 = low_k * 0.99
+                if e > 0 and s0 > e * (1 - BT["min_stop_pct"] / 100):
+                    s0 = e * (1 - BT["min_stop_pct"] / 100)
+                if not (e > s0 > 0) or (e - s0) / e * 100 > BT["max_stop_pct"] or j0 >= n:
+                    continue
+                tr = _hold_from(f, j0, e, s0, part, None, mode="close", emerg=3)
+                ent, ex, e_, px, R, wk, why, _ = tr
+                busy[mode] = f.index.get_loc(ex) if ex is not None else n
+                rows.append(dict(ticker=t, mode=mode, sig_date=f.index[i], k=k, up=sl[i] > 0, rs=rs[i], sm=capmap.get(t) == "소형",
+                                 R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, stop_pct=(e - s0) / e * 100))
+    return pd.DataFrame(rows)
+
+
 def _bounce(f, i, quiet):
     """30주선 부근 반등: 최근 3주 안에 30주선 +3% 이내까지 눌렸다가, 이번 주 거래량 늘며 양봉으로 반등 (지난주보다 높게 마감)"""
     o, l, c, ma, vr, st, sl = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values, f["vr"].values, f["stage"].values, f["slope"].values
@@ -1592,6 +1636,20 @@ def main(argv=None, fetch=None, universe=None):
                    ("[매물] 소형주 중 -25% 이하 비율 → 신호 수만 비교", allsig["sm"] & (allsig["dd"] <= -25)), ("[매물] 대·중형 중 -25% 이하 → 신호 수만 비교", ~allsig["sm"] & (allsig["dd"] <= -25))]:
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
+    rc = reclaim_study(frames, start, capmap)
+    if len(rc):
+        for mode, nm in (("close", "회복한 주 금요일 종가 매수"), ("intra", "그 주 장중 30주선 돌파 매수")):
+            r0 = rc[rc["mode"] == mode]
+            sw = r0["stop_pct"].mean() if len(r0) else 0
+            for lab, m in [(f"{nm} · 전체 (평균 손절폭 {sw:.1f}%)", r0["k"] > 0),
+                           ("· 이탈 1~2주", r0["k"] <= 2), ("· 이탈 3~4주", (r0["k"] >= 3) & (r0["k"] <= 4)), ("· 이탈 5~8주", r0["k"] >= 5),
+                           ("· 회복 때 30주선 상승 중", r0["up"]), ("· 회복 때 30주선 평평·하락", ~r0["up"]),
+                           ("· RS 0 이상", r0["rs"] >= 0), ("· RS 0 미만", r0["rs"] < 0),
+                           ("· 대·중형", ~r0["sm"]), ("· 소형", r0["sm"]),
+                           ("· ~2015", r0["sig_date"] < pd.Timestamp("2016-01-01")), ("· 2016~", r0["sig_date"] >= pd.Timestamp("2016-01-01"))]:
+                st_ = stats_trades(r0[m])
+                buckets.append(("[30주선 회복] " + lab, st_))
+                print(f"  [30주선 회복] {nm if lab.startswith('·') else ''}{lab}: {st_.get('n', 0)}개 · 승률 {f_(st_.get('win'))}% · 평균 {f_(st_.get('ret'))}% · {f_(st_.get('avgR'), 2)}R")
     buckets.extend(beta_rows)
     sigtab = [(k, stats_trades(clean[clean["signal"] == k])) for k in BT["signals"]]
     yearly = pd.DataFrame({k: v.resample("YE").last().pct_change() * 100 for k, v in curves.items()})
