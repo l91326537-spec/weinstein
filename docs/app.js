@@ -277,6 +277,7 @@ async function viewHome(v) {
   const secs = SUM.sectors;
   v.innerHTML = `
   <a class="card item" href="#orders" style="text-decoration:none"><span class="pill st2">주문</span><span style="min-width:0"><b>이번 주 주문</b><div class="n">${(() => { const a = watchAge(store.get().settings); return a != null && a >= WATCH_DAYS - 5 ? `<b style="color:var(--s4)">자동감시주문 만료 임박 (${a}일 전 설정)</b>` : "매수·매도·손절 주문, 키움 자동감시 설정값 · 보내기/복사"; })()}</div></span><span class="r">›</span></a>
+  <a class="card item" href="#guide" style="text-decoration:none"><span class="pill st1">정리</span><span style="min-width:0"><b>원칙·백테스트 정리</b><div class="n">4단계, 매수·매도 원칙, 백테스트로 확인한 것</div></span><span class="r">›</span></a>
   <section class="card"><h3>시장</h3>${mrow}
     ${worst === 4 ? `<div class="warn">시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>` : worst === 3 ? `<div class="warn">시장 3단계: 매수 규모 축소, 손절 좁히기</div>` : ""}
   </section>
@@ -642,6 +643,67 @@ async function viewJournal(v) {
   v.querySelectorAll("[data-deltr]").forEach(b => b.onclick = () => confirmSheet("이 거래 기록을 삭제할까요?", () => { const d = store.get(); d.trades = d.trades.filter(x => x.id !== b.dataset.deltr); store.save(); route(); }));
 }
 
+
+/* ---------- 화면: 원칙·백테스트 정리 ---------- */
+const GUIDE = [
+  { h: "4단계 한눈에", open: true, items: [
+    ["1단계 바닥", "30주선 평평, 주가가 그 위아래로 오르내림. 아직 사지 않고 관심종목에 둠"],
+    ["2단계 상승", "주가가 30주선 위, 30주선이 올라감. 유일하게 사는 구간"],
+    ["3단계 천장", "30주선이 평평해지고 자주 깨짐. 새로 사지 않음, 손절 좁히기"],
+    ["4단계 하락", "주가가 30주선 아래, 30주선이 내려감. 보유 종목은 팔고 절대 사지 않음"]] },
+  { h: "매수 원칙", items: [
+    ["시장·업종 먼저", "시장(나스닥·S&P 중 나쁜 쪽)이 4단계면 신규 매수 없음, 업종 ETF도 2단계가 좋음"],
+    ["돌파 매수", "1단계 박스(저항선)를 주봉 종가로 넘을 때, 돌파 주 거래량이 평소의 2배 이상이면 가장 좋음"],
+    ["풀백 매수", "2단계에서 올라가는 30주선이나 돌파선까지 거래량이 줄며 내려왔을 때"],
+    ["RS (맨스필드)", "0 위로 올라오는 중이거나 0 이상인 종목. 시장보다 약한 종목은 피함"],
+    ["추격 금지", "돌파 지점보다 7% 넘게 올라가 있으면 사지 않고 되돌림을 기다림"]] },
+  { h: "매도·손절 원칙", items: [
+    ["손절 기준", "금요일 종가가 손절가 아래면 월요일에 매도, 장중에는 손절가 -3%(비상 손절)만 자동 매도"],
+    ["4단계", "종목이 4단계로 들어가면 매도"],
+    ["손절선 올리기", "수익이 나면 30주선·최근 저점 아래로 손절선을 따라 올림. 트레일링 스톱처럼 일찍 파는 규칙은 백테스트에서 모두 손해"],
+    ["30주선 이탈", "실적 급락 뒤 30주선을 지킨 종목도 58%는 나중에 깨짐 → 30주선 이탈 매도 규칙이 핵심"]] },
+  { h: "돈 관리", items: [
+    ["1% 위험", "한 번 손절 시 계좌의 1%만 잃도록 수량 결정 (수량 = 계좌×1% ÷ (매수가-손절가))"],
+    ["종목 수", "최대 6종목, 한 종목 최대 17%(= 100% ÷ 6)"],
+    ["남는 돈은 QQQ", "현금으로 두면 연 11.4%, QQQ로 채우면 15.2%. 목표와 차이가 계좌의 25% 넘을 때만 맞추면 연 5회 매매"],
+    ["QQQ도 4단계면 매도", "안 팔면 수익은 비슷한데 최대 낙폭이 -26% → -50%"],
+    ["레버리지", "TQQQ 보유는 연 27%지만 최대 낙폭 -94%. 감당하기 어려워 쓰지 않음"]] },
+  { h: "백테스트로 확인한 것 (2006년~, 대·중형주)", items: [
+    ["전체 성과", "전략 연평균 약 15.4%, 최대 낙폭 약 -26% (SPY 그냥 보유 11.0%)"],
+    ["1→2단계 돌파", "평균 1.61R vs 2단계 중간 돌파 1.37R → 1→2 돌파에 +10점"],
+    ["기저 길이", "26주 이상 기저 돌파 1.54R vs 짧은 기저 1.10R → 긴 기저 +4, 짧은 기저 -8"],
+    ["돌파 거래량", "2배 이상 2.87R vs 1배 미만 1.27R. 다만 거래량 부족하다고 바로 파는 규칙은 오히려 손해"],
+    ["대박 종목 조합", "대·중형 + 기저 26주+ + 돌파 거래량 2배+ + RS 0 이상 → 평균 3.2R, 5건 중 1건은 3R 이상"],
+    ["2단계 후반", "30주선이 40주 넘게 올랐거나 52주 +60% 이상이면 1.44R vs 1.62R → -8점"],
+    ["돌파 실패 후 재돌파", "13주 안에 돌파 실패 뒤 다시 돌파하면 0.19R, 승률 11% → -20점"],
+    ["풀백 전 30주선 이탈", "최근 13주 안에 30주선을 깬 뒤의 풀백 1.33R vs 1.72R → -10점"],
+    ["헤드앤숄더 천장", "천장 패턴 완성 뒤 신호 0.78R vs 1.55R → -10점. 다른 차트 패턴(이중바닥, 역헤드앤숄더 등)은 효과 거의 없음"],
+    ["바로 위 전고점 매물", "위 10% 안에 2년 내 전고점이 쌓이면 -8점 → 연평균 14.2 → 15.4%, 2008·2022 손실도 줄어듦 (큰 하락 뒤 긴 기저는 예외)"],
+    ["소형주", "신호 성과가 크게 낮아 매수 신호에서 제외 (참고용으로만 표시)"],
+    ["해외 ADR", "넣으면 연평균 15.4 → 12.1%로 낮아져 매수 신호 제외"],
+    ["시장 약할 때", "방어 업종보다 경기민감 업종의 대·중형·RS 0 이상 종목이 대박 비율이 더 높음"]] },
+  { h: "효과 없거나 나빴던 것", items: [
+    ["60주선 터치 매수", "전체 평균은 30주선 터치보다 약함. RS 0 이상일 때만 좋음(3.5R), 30주선을 깬 상태면 평범"],
+    ["30주선 회복 매수", "깨졌다 다시 올라선 주에 사면 대·중형 약 1.9R이지만 2016년 이후 약해짐"],
+    ["횡보장 박스 매매", "박스 아래에서 사고 위에서 파는 방식, 횡보장 전환 규칙 모두 지금 전략보다 나쁨"],
+    ["볼린저 수축 가점", "신호는 조금 좋아도 포트폴리오 수익 개선 없이 낙폭만 커져서 사용 안 함"],
+    ["30주선 들락날락·급락 이력 감점", "효과가 없어 사용 안 함"],
+    ["상승/하락 거래량 비율", "그것만으로는 차이 없음"],
+    ["실적 급락 후 30주선 유지", "다른 신호와 성과 비슷, 특별히 좋지 않음"]] },
+  { h: "꼭 알아둘 한계", items: [
+    ["생존 편향", "지금 지수에 남아 있는 회사들로 과거를 돌려서 실제보다 좋게 나옴"],
+    ["거래 수", "포트폴리오 실제 거래는 약 100건이라 1~2%p 차이는 우연일 수 있음"],
+    ["이벤트 거래량", "인수합병·주식교환 때문에 늘어난 거래량은 수요가 아님 (SEC 공시 확인 기능은 SEC_UA 설정 후 작동)"],
+    ["투자 조언 아님", "규칙을 기계적으로 적용한 결과이며 수익을 보장하지 않음"]] },
+];
+function viewGuide(v) {
+  v.innerHTML = `<h1>원칙·백테스트 정리</h1>
+  <p class="note">스탠 와인스타인의 단계 분석 원칙과, 이 앱의 점수·규칙을 정할 때 쓴 백테스트 결과를 모았어요. 숫자는 최근 백테스트 기준이며, 규칙이 바뀌면 함께 고쳐요.</p>
+  ${GUIDE.map(g => `<details class="card guide"${g.open ? " open" : ""}><summary><h3>${esc(g.h)}</h3></summary>
+    <div class="glist">${g.items.map(([k, d]) => `<div><b>${esc(k)}</b><span>${esc(d)}</span></div>`).join("")}</div></details>`).join("")}
+  <div class="btns"><a class="btn" href="backtest/">전체 백테스트 결과 보기</a></div>`;
+}
+
 /* ---------- 화면: 설정·백업 ---------- */
 function viewSettings(v) {
   const s = store.get().settings;
@@ -655,6 +717,7 @@ function viewSettings(v) {
   <section class="card"><h3>백업</h3>
     <p class="note">보유 종목과 매매일지는 이 휴대폰 브라우저에만 저장돼요. 앱을 지우거나 브라우저 데이터를 지우면 사라지니 가끔 백업 파일을 받아 두세요.</p>
     <div class="btns"><button class="btn" id="exp">백업 파일 받기</button><label class="btn" for="imp">백업 불러오기</label><input id="imp" type="file" accept="application/json,.json" hidden></div></section>
+  <section class="card"><h3>원칙·백테스트 정리</h3><div class="btns"><a class="btn" href="#guide">정리 보기</a></div></section>
   <section class="card"><h3>백테스트</h3>
     <p class="note" id="btinfo">결과 확인 중…</p>
     <div class="btns"><a class="btn" id="btlink" href="backtest/" hidden>백테스트 결과 보기</a></div>
@@ -813,7 +876,7 @@ async function route() {
   const v = $("#view");
   const [tab, arg] = (location.hash.slice(1) || "home").split("/");
   document.querySelectorAll(".tabs a").forEach(a => a.toggleAttribute("aria-current", false));
-  const cur = document.querySelector(`.tabs a[data-tab="${tab === "settings" ? "hold" : tab}"]`); if (cur) cur.setAttribute("aria-current", "page");
+  const cur = document.querySelector(`.tabs a[data-tab="${tab === "settings" ? "hold" : tab === "guide" ? "home" : tab}"]`); if (cur) cur.setAttribute("aria-current", "page");
   if (!SUM) { try { await loadSummary(); } catch (e) { v.innerHTML = `<div class="empty">데이터를 불러오지 못했어요.<br>아직 첫 갱신 전이거나 인터넷 연결이 끊겼어요.</div>`; $("#updated").textContent = "데이터 없음"; return; } }
   window.onresize = null;
   try {
@@ -823,6 +886,7 @@ async function route() {
     else if (tab === "hold") await viewHold(v);
     else if (tab === "journal") await viewJournal(v);
     else if (tab === "settings") viewSettings(v);
+    else if (tab === "guide") viewGuide(v);
     else await viewHome(v);
   } catch (e) { console.error(e); v.innerHTML = `<div class="empty">화면을 그리다 문제가 생겼어요. 새로고침해 보세요.</div>`; }
   window.scrollTo(0, 0);
