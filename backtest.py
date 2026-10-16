@@ -255,6 +255,33 @@ def _hold_from(f, j0, e, s0, partial_first, vol_check, be=None, mode="intra", dy
     return (f.index[j0], None, e, c[-1], (c[-1] - e) / risk, len(f) - 1 - j0, "보유 중", s0)
 
 
+def ma_touch_study(frames, start, capmap, n=60, stop_pct=5.0, above_weeks=8):
+    """n주선 터치 매수: n주선이 13주 전보다 높고(상승 중) 직전 above_weeks주 연속 종가가 n주선 위였는데, 이번 주 저가가 n주선 +1% 안까지 내려옴
+       → n주선 가격(시가가 더 낮으면 시가)에 장중 매수. 손절 = 매수가 -stop_pct%, 금요일 종가 손절 + 비상 -3%, 4단계까지 보유"""
+    rows = []
+    for t, f in frames.items():
+        o, lo, c = f["open"].values, f["low"].values, f["close"].values
+        ma = f["close"].rolling(n).mean().values
+        ma30, stg, rs, dv = f["ma30"].values, f["stage"].values, f["rs"].values, f["dollar_vol"].values
+        N = len(f)
+        busy = -1
+        for i in range(n + 13, N):
+            if i <= busy or f.index[i] < start or math.isnan(ma[i]) or not (ma[i] > ma[i - 13]):
+                continue
+            if not all(c[i - 1 - k] > ma[i - 1 - k] for k in range(above_weeks)) or not (lo[i] <= ma[i] * 1.01):
+                continue
+            if c[i] < S.CFG["min_price"] or (dv[i] if not math.isnan(dv[i]) else 0) < S.CFG["min_dollar_vol"]:
+                continue
+            e = min(o[i], ma[i] * 1.01)
+            s0 = e * (1 - stop_pct / 100)
+            tr = _hold_from(f, i, e, s0, True, None, mode="close", emerg=3)
+            ent, ex, e_, px, R, wk, why, _ = tr
+            busy = f.index.get_loc(ex) if ex is not None else N
+            rows.append(dict(ticker=t, sig_date=f.index[i], R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why,
+                             sm=capmap.get(t) == "소형", st=stg[i], rs=rs[i], u30=c[i] < ma30[i] if not math.isnan(ma30[i]) else False))
+    return pd.DataFrame(rows)
+
+
 def reclaim_study(frames, start, capmap, maxk=8):
     """30주선 아래로 1~maxk주 마감했다가 다시 위로 올라선 주에 매수. 손절 = 이탈 기간 최저가 -1%, 금요일 종가 손절 + 비상 -3%, 4단계까지 보유.
        close = 회복한 주 금요일 종가 매수 / intra = 그 주 장중 30주선 돌파 때 매수(그 주 종가가 다시 30주선 아래여도 산 것으로 침)"""
@@ -2047,6 +2074,23 @@ def main(argv=None, fetch=None, universe=None):
                    ("[매물] 소형주 중 -25% 이하 비율 → 신호 수만 비교", allsig["sm"] & (allsig["dd"] <= -25)), ("[매물] 대·중형 중 -25% 이하 → 신호 수만 비교", ~allsig["sm"] & (allsig["dd"] <= -25))]:
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
+    try:
+        for n_, sp in ((60, 5.0), (60, 8.0), (30, 5.0), (30, 8.0), (40, 5.0)):
+            mt = ma_touch_study(frames, start, capmap, n=n_, stop_pct=sp)
+            if not len(mt):
+                continue
+            lg = ~mt["sm"]
+            for lab, m in [("대·중형 전체", lg), ("소형", mt["sm"]),
+                           ("대·중형 · 그 주 종가가 30주선 아래", lg & mt["u30"]), ("대·중형 · 30주선 위 유지", lg & ~mt["u30"]),
+                           ("대·중형 · 2단계", lg & (mt["st"] == 2)), ("대·중형 · 3단계", lg & (mt["st"] == 3)),
+                           ("대·중형 · RS 0+", lg & (mt["rs"] >= 0)), ("대·중형 · RS 0 미만", lg & (mt["rs"] < 0)),
+                           ("대·중형 · ~2015", lg & (mt["sig_date"] < pd.Timestamp("2016-01-01"))), ("대·중형 · 2016~", lg & (mt["sig_date"] >= pd.Timestamp("2016-01-01")))]:
+                st_ = stats_trades(mt[m])
+                nm = f"[{n_}주선 터치 · 손절 -{sp:.0f}%] {lab}"
+                buckets.append((nm, st_))
+                print(f"  {nm}: {st_.get('n', 0)}개 · 승률 {f_(st_.get('win'))}% · 평균 {f_(st_.get('ret'))}% · {f_(st_.get('avgR'), 2)}R · 3R+ {f_(st_.get('big'))}% · {f_(st_.get('weeks'), 0)}주")
+    except Exception as ex:
+        print("  이평선 터치 분석 실패:", ex)
     rc = reclaim_study(frames, start, capmap)
     if len(rc):
         for mode, nm in (("close", "회복한 주 금요일 종가 매수"), ("intra", "그 주 장중 30주선 돌파 매수")):
