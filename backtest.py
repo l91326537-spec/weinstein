@@ -448,7 +448,7 @@ def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
     rows = []
     vs = [("현금으로 둠 (개별주만)", None)]
     if fill:
-        vs += [("QQQ로 채움 · 차이 10%면 맞춤 (지금)", fill), ("QQQ로 채움 · 차이 25%면 맞춤", dict(fill, band=25)),
+        vs += [("QQQ로 채움 · 차이 10%면 맞춤", dict(fill, band=10)), ("QQQ로 채움 · 차이 25%면 맞춤 (지금)", fill),
                ("QQQ로 채움 · 4단계에도 안 팖", dict(fill, filt=False, band=25))]
     for nm, fl in vs:
         e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fl, max_small=msmall, caps=capmap)
@@ -1877,7 +1877,7 @@ def main(argv=None, fetch=None, universe=None):
         if etf not in dfs:
             return "skip"
         x = dfs[etf]
-        return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=10)
+        return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=25)   # 앱과 같게: 차이 25% 넘을 때만 QQQ 맞춤
     q = F("QQQ")
     capmap = {t: v.get("cap") for t, v in uni.items()}
     try:
