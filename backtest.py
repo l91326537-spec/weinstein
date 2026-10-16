@@ -441,6 +441,25 @@ def event_study(allsig, capmap, buckets, days=90):
         print(f"  [이벤트 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
 
 
+def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+    """남는 돈 처리: QQQ로 채우기(지금) vs 현금으로 두기 vs 리밸런싱 폭을 넓혀 QQQ 매매 줄이기. 반환: 곡선 표 행"""
+    sig0 = base_run[0]
+    yrs = max((cal[-1] - cal[0]).days / 365.25, 1)
+    rows = []
+    vs = [("현금으로 둠 (개별주만)", None)]
+    if fill:
+        vs += [("QQQ로 채움 · 차이 10%면 맞춤 (지금)", fill), ("QQQ로 채움 · 차이 25%면 맞춤", dict(fill, band=25)),
+               ("QQQ로 채움 · 4단계에도 안 팖", dict(fill, filt=False, band=25))]
+    for nm, fl in vs:
+        e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fl, max_small=msmall, caps=capmap)
+        tx = e_.attrs.get("etf_tx", 0)
+        rows.append(curve_row(f"[남는 돈] {nm}", f"주식 평균 비중 {e_['stk'].mean():.0f}% · QQQ {e_['etf'].mean():.0f}% · QQQ 매매 연 {tx / yrs:.1f}회 · 개별주 거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    return rows
+
+
 def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap):
     """종목 범위별 같은 전략: 원래 지수 목록만 / + 해외 ADR / + 나스닥 시총 2조원+ 추가 종목. 반환: 곡선 표 행"""
     sig0, eq0, _ = base_run
@@ -1002,6 +1021,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
     fill: 남는 돈을 ETF로 채우기. dict(o=시가, c=종가, mkt=시장 단계, frac=채울 비율, half3=3단계면 절반, filt=4단계면 매도, band=리밸런싱 폭%)"""
     mp = max_pos or BT["max_pos"]
     etf_sh, inv_sum = 0.0, 0.0
+    etf_tx = 0                                       # ETF 사고판 횟수 (리밸런싱·매수 자금 마련 매도)
     cands = sig[(sig["score"] >= min_score)]
     if order:
         cands = cands.sort_values(["entry_date", "score", order], ascending=[True, False, True])
@@ -1034,6 +1054,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 dv = target - etf_v
                 cash -= dv + abs(dv) * cost
                 etf_sh = target / eo
+                etf_tx += 1
         # 1) 이번 주 시가 매수 (지난주까지의 자금으로), 자리가 꽉 찼으면 갈아타기 규칙 확인
         if d in by_week:
             for _, r in by_week[d].iterrows():
@@ -1079,6 +1100,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                     sell = min(-cash / (1 - cost), etf_sh * eo)
                     etf_sh -= sell / eo
                     cash += sell * (1 - cost)
+                    etf_tx += 1
                 pos[key] = dict(shares=shares, exit_date=r["exit_date"], exit=r["exit"], r=r, add=is_add)
         # 2) 이번 주 청산
         for t in list(pos):
@@ -1100,6 +1122,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
         equity = cash + mv + ev
         curve.append((d, equity, len(pos), mv / equity * 100 if equity else 0, ev / equity * 100 if equity else 0))
     eq = pd.DataFrame(curve, columns=["date", "equity", "n", "stk", "etf"]).set_index("date")
+    eq.attrs["etf_tx"] = etf_tx
     return eq, pd.DataFrame(trades)
 
 
@@ -1938,6 +1961,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(fill_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  남는 돈 비교 실패:", ex)
     try:
         lev[0].extend(universe_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap,
                                      {t: v.get("src") for t, v in uni.items()}))
