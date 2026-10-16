@@ -650,6 +650,7 @@ function viewSettings(v) {
     <label>계좌 금액 (원)<input id="g_acc" type="number" inputmode="numeric" value="${esc(s.account)}"></label>
     <div class="grid2"><label>한 번 손절 시 계좌 손실<select id="g_risk">${[0.5, 1, 1.5, 2].map(x => `<option value="${x}" ${+s.riskPct === x ? "selected" : ""}>${x}%</option>`).join("")}</select></label>
     <label>최대 보유 종목<input id="g_max" type="number" min="1" max="20" value="${esc(s.maxPos)}"></label></div>
+    <label>QQQ 보유 수량 (남는 돈을 채우는 용도)<input id="g_qqq" type="number" inputmode="numeric" min="0" value="${esc(s.qqqShares || 0)}"></label>
     <button class="btn primary" type="submit">저장</button></form></section>
   <section class="card"><h3>백업</h3>
     <p class="note">보유 종목과 매매일지는 이 휴대폰 브라우저에만 저장돼요. 앱을 지우거나 브라우저 데이터를 지우면 사라지니 가끔 백업 파일을 받아 두세요.</p>
@@ -664,7 +665,7 @@ function viewSettings(v) {
     if (r.ok) { const lm = r.headers.get("last-modified"); el.textContent = "최근 결과" + (lm ? " · " + new Date(lm).toLocaleDateString("ko-KR") : ""); $("#btlink", v).hidden = false; }
     else el.textContent = "아직 백테스트 결과가 없어요.";
   }).catch(() => { const el = $("#btinfo", v); if (el) el.textContent = "결과를 확인하지 못했어요."; });
-  $("#setf", v).onsubmit = e => { e.preventDefault(); const d = store.get(); d.settings = { ...d.settings, account: +$("#g_acc", v).value || 0, riskPct: +$("#g_risk", v).value, maxPos: +$("#g_max", v).value || 6 }; store.save(); toast("저장했어요"); };
+  $("#setf", v).onsubmit = e => { e.preventDefault(); const d = store.get(); d.settings = { ...d.settings, account: +$("#g_acc", v).value || 0, riskPct: +$("#g_risk", v).value, maxPos: +$("#g_max", v).value || 6, qqqShares: +$("#g_qqq", v).value || 0 }; store.save(); toast("저장했어요"); };
   $("#exp", v).onclick = () => { const blob = new Blob([JSON.stringify(store.get(), null, 1)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `stage-backup-${today()}.json`; document.body.appendChild(a); a.click(); a.remove(); };
   $("#imp", v).onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!Array.isArray(d.holdings) || !Array.isArray(d.trades)) throw 0; store.replace(d); toast(`불러왔어요 · 보유 ${d.holdings.length} · 거래 ${d.trades.length}`); } catch (_) { toast("백업 파일 형식이 아니에요"); } };
 }
@@ -707,7 +708,23 @@ async function weekOrders() {
     if (!o.qty) continue;
     buys.push({ c, ...o, emerg: o.sl * 0.97, amt: Math.round(toKRW(o.qty * o.entry, c.t)) });
   }
-  return { sells, keeps, buys, slots, more: pool.length - buys.length, s };
+  return { sells, keeps, buys, slots, more: pool.length - buys.length, s, q: await qqqPlan(s, keeps, buys) };
+}
+/* 남는 돈은 QQQ로: 목표(계좌 - 개별주, 시장 4단계면 0)와 차이가 계좌의 25% 넘을 때만 맞춤
+   백테스트: 현금으로 두면 연 11.4% · QQQ 10%폭 15.4%(연 9회 매매) · 25%폭 15.2%(연 5회) · 4단계에도 안 팔면 낙폭 -50% */
+const QQQ_BAND = 25;
+async function qqqPlan(s, keeps, buys) {
+  try {
+    const qd = await loadT("QQQ"), px = qd.w[qd.w.length - 1][W.c], pxK = toKRW(px, "QQQ");
+    const held = +s.qqqShares || 0;
+    const stk = keeps.reduce((a, k) => a + (k.close ? toKRW(k.close * +k.h.shares, k.h.t) : 0), 0) + buys.reduce((a, b) => a + b.amt, 0);
+    const cur = held * pxK, target = SUM.worst === 4 ? 0 : Math.max(0, (+s.account || 0) - stk);
+    const diff = target - cur;
+    let sh = 0;
+    if (target === 0 && held > 0) sh = -held;
+    else if (Math.abs(diff) > (+s.account || 0) * QQQ_BAND / 100) sh = diff > 0 ? Math.floor(diff / pxK) : -Math.min(held, Math.ceil(-diff / pxK));
+    return { px, held, cur, target, sh, stk };
+  } catch (e) { return null; }
 }
 /* 키움 자동감시주문(서버 감시)에 옮겨 넣을 값: 보유·신규 매수 종목의 비상 손절(스탑로스), 돌파 대기 종목의 매수 감시 */
 const WATCH_DAYS = 30;     // 미국 주식 자동감시주문 유효기간 (키움 화면에서 실제 값 확인)
@@ -730,7 +747,8 @@ function ordersText(O) {
       `  손절: 금요일 종가 ${fmt(b.sl)} 아래면 매도 · 비상 자동 매도 ${fmt(b.emerg)}`));
   }
   if (O.keeps.length) { L.push("", "■ 보유 유지 (손절 주문 확인)"); O.keeps.forEach(k => L.push(`- ${k.h.t}: 금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 ${fmt(k.stop * 0.97)}`)); }
-  if (!O.sells.length && !O.buys.length) L.push("", "이번 주 새 주문 없음");
+  if (O.q && O.q.sh) L.push("", `■ QQQ (남는 돈)`, `- QQQ ${O.q.sh > 0 ? "매수" : "매도"} ${Math.abs(O.q.sh)}주 (월요일 시가 근처)`);
+  if (!O.sells.length && !O.buys.length && !(O.q && O.q.sh)) L.push("", "이번 주 새 주문 없음");
   const R = watchRows(O), line = r => `- ${r.t} ${r.side}: 현재가 ${fmt(r.trig)} ${r.cond} → ${r.price} · ${r.qty}주${r.after ? " (매수 체결 뒤)" : ""}`;
   if (R.sl.length || R.by.length || R.bsl.length) {
     L.push("", `■ 키움 자동감시주문 (유효 ${WATCH_DAYS}일)`);
@@ -758,6 +776,10 @@ async function viewOrders(v) {
       : `<p class="note">${O.slots ? "조건에 맞는 매수 신호가 없어요." : `빈자리가 없어요 (최대 ${s.maxPos}종목).`}</p>`}
     ${O.more > 0 && O.buys.length ? `<p class="note">자리가 없어 빠진 ${BUY_SCORE}점+ 신호 ${O.more}개는 '후보 → 매수 ${BUY_SCORE}+'에서 볼 수 있어요.</p>` : ""}
   </section>
+  ${O.q ? `<section class="card"><h3>QQQ (남는 돈) ${O.q.sh ? `<span class="pill ${O.q.sh > 0 ? "st2" : "st4"}">${O.q.sh > 0 ? "매수" : "매도"} ${Math.abs(O.q.sh)}주</span>` : `<span class="pill">그대로</span>`}</h3>
+    <div class="n">보유 ${O.q.held}주 (약 ${Math.round(O.q.cur / 10000).toLocaleString()}만원) · 목표 약 ${Math.round(O.q.target / 10000).toLocaleString()}만원 · 현재가 ${fmt(O.q.px)}</div>
+    <p class="note">${SUM.worst === 4 ? "시장 4단계라 QQQ는 모두 팔아요." : `계좌에서 개별주(약 ${Math.round(O.q.stk / 10000).toLocaleString()}만원)를 뺀 나머지를 QQQ로 채워요. 목표와 차이가 계좌의 ${QQQ_BAND}%를 넘을 때만 사고팔아서 1년에 5번 정도만 손대면 돼요.`}
+    QQQ 보유 수량은 설정에서 입력해요. 개별주를 살 돈이 모자라면 QQQ를 팔아서 마련하세요.</p></section>` : ""}
   ${O.keeps.length ? `<section class="card"><h3>보유 유지 ${O.keeps.length}종목</h3><p class="note">증권사에 걸어 둔 손절 주문이 맞는지 확인하세요.</p>
     <div class="list">${O.keeps.map(k => `<a class="item" href="#stock/${encodeURIComponent(k.h.t)}"><span class="pill st2">유지</span><span style="min-width:0"><b class="mono">${esc(k.h.t)}</b> ${k.h.shares}주<div class="n">금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 자동 매도 ${fmt(k.stop * 0.97)}</div></span><span class="r"><b>${fmt(k.close)}</b></span></a>`).join("")}</div></section>` : ""}
   ${(() => {
