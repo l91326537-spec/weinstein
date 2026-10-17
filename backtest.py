@@ -448,6 +448,12 @@ def sizing_study(frames, cal, base_run, ms0, fill, msmall, capmap):
     old_r, old_w = BT["risk_pct"], BT["max_weight"]
     grid = [(6, 1.0, 25), (4, 1.0, 25), (5, 1.0, 25), (8, 1.0, 25), (10, 1.0, 25),
             (6, 1.5, 25), (6, 2.0, 25), (5, 1.5, 25), (4, 2.0, 25), (8, 1.5, 25), (6, 1.0, 20), (6, 1.5, 20)]
+    for ms in (65, 70, 75, 80, 85):              # 개별주만(남는 돈 현금)일 때 매수 기준 점수
+        e_, t_ = run_portfolio(sig0, frames, cal, ms, max_pos=6, fill=None, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[개별주만] {ms}점 이상 매수 · 남는 돈 현금", f"개별주 평균 {e_['stk'].mean():.0f}% · 거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
     try:
         for mp_, rk, mw in grid:
             BT["risk_pct"], BT["max_weight"] = rk, mw
