@@ -536,6 +536,7 @@ def indicators(df):
     f["base_low"] = l.shift(1).rolling(bw).min()
     vavg = v.shift(1).rolling(10).mean()
     vr = (v / vavg).where(vavg > 0, 0.0)
+    f["vol"], f["vavg"] = v, vavg
     f["vr"] = vr
     brk = (c > res) & (c.shift(1) <= res)
     f["brk_week"] = np.nan

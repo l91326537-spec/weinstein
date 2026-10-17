@@ -528,6 +528,31 @@ def pullback_quality_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap,
     return rows
 
 
+def vol2_study(allsig, frames, capmap, buckets):
+    """늦은 요일 돌파는 주봉 거래량이 작게 보일 수 있음 → 돌파 주 + 다음 주 거래량(돌파 전 10주 평균 대비)으로 다시 보기"""
+    d = allsig[allsig["kind"].isin(["B12", "B2"]) & (allsig["ticker"].map(capmap) != "소형")].copy()
+    v1, v2 = [], []
+    for t, dd in zip(d["ticker"], d["entry_date"]):
+        f = frames[t]
+        try:
+            i = f.index.get_loc(dd)
+        except KeyError:
+            v1.append(np.nan); v2.append(np.nan); continue
+        avg = f["vavg"].iloc[i]
+        if not avg or np.isnan(avg) or i + 1 >= len(f):
+            v1.append(np.nan); v2.append(np.nan); continue
+        v1.append(f["vol"].iloc[i] / avg); v2.append((f["vol"].iloc[i] + f["vol"].iloc[i + 1]) / (2 * avg))
+    d["v1"], d["v2"] = v1, v2
+    for lab, m in [("돌파 주 2배+", d["v1"] >= 2), ("돌파 주 2배 미만", d["v1"] < 2),
+                   ("돌파 주 2배 미만 → 2주 평균 2배+ (늦게 확인)", (d["v1"] < 2) & (d["v2"] >= 2)),
+                   ("돌파 주 2배 미만 → 2주 평균 1.5~2배", (d["v1"] < 2) & (d["v2"] >= 1.5) & (d["v2"] < 2)),
+                   ("돌파 주 2배 미만 → 2주 평균도 1.5배 미만", (d["v1"] < 2) & (d["v2"] < 1.5)),
+                   ("2주 평균 2배+ (돌파 주 여부 무관)", d["v2"] >= 2), ("2주 평균 2배 미만", d["v2"] < 2)]:
+        st = stats_trades(d[m.fillna(False)])
+        buckets.append((f"[2주 거래량] {lab} (대·중형 돌파)", st))
+        print(f"  [2주 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+
+
 def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap):
     """종목 범위별 같은 전략: 원래 지수 목록만 / + 해외 ADR / + 나스닥 시총 2조원+ 추가 종목. 반환: 곡선 표 행"""
     sig0, eq0, _ = base_run
@@ -2116,6 +2141,10 @@ def main(argv=None, fetch=None, universe=None):
         lev[0].extend(pullback_quality_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, buckets))
     except Exception as ex:
         print("  풀백 품질 비교 실패:", ex)
+    try:
+        vol2_study(allsig, frames, capmap, buckets)
+    except Exception as ex:
+        print("  2주 거래량 비교 실패:", ex)
     try:
         event_study(allsig, capmap, buckets)
     except Exception as ex:
