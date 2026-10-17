@@ -2314,7 +2314,7 @@ def main(argv=None, fetch=None, universe=None):
         buckets.append((lab, stats_trades(allsig[m])))
         print(f"  {lab}: {stats_trades(allsig[m]).get('n', 0)}개 · 평균 {f_(stats_trades(allsig[m]).get('avgR'))}R")
     try:
-        for n_, sp in ((60, 5.0), (60, 8.0), (30, 5.0), (30, 8.0), (40, 5.0)):
+        for n_, sp in ((10, 5.0), (10, 8.0), (60, 5.0), (60, 8.0), (30, 5.0), (30, 8.0), (40, 5.0)):
             mt = ma_touch_study(frames, start, capmap, n=n_, stop_pct=sp)
             if not len(mt):
                 continue
