@@ -441,7 +441,7 @@ def event_study(allsig, capmap, buckets, days=90):
         print(f"  [이벤트 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
 
 
-def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, extra=()):
     """남는 돈 처리: QQQ로 채우기(지금) vs 현금으로 두기 vs 리밸런싱 폭을 넓혀 QQQ 매매 줄이기. 반환: 곡선 표 행"""
     sig0 = base_run[0]
     yrs = max((cal[-1] - cal[0]).days / 365.25, 1)
@@ -449,7 +449,7 @@ def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
     vs = [("현금으로 둠 (개별주만)", None)]
     if fill:
         vs += [("QQQ로 채움 · 차이 10%면 맞춤", dict(fill, band=10)), ("QQQ로 채움 · 차이 25%면 맞춤 (지금)", fill),
-               ("QQQ로 채움 · 4단계에도 안 팖", dict(fill, filt=False, band=25))]
+               ("QQQ로 채움 · 4단계에도 안 팖", dict(fill, filt=False, band=25))] + list(extra)
     for nm, fl in vs:
         e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fl, max_small=msmall, caps=capmap)
         tx = e_.attrs.get("etf_tx", 0)
@@ -1745,12 +1745,21 @@ def lev_study(dfs, cal, start, sats):
         curve_row("QQQ 70 + TQQQ 30", "4주마다 비중 맞춤 (전체 약 1.6배)", mix([QQQ, TQQQ], [0.7, 0.3])),
     ]
     core = {"QQQ": QQQ, "QLD": QLD}
+    if "SPY" in dfs:
+        sw = dfs["SPY"]["Close"].reindex(cal, method="ffill").bfill()
+        SPY = sw / sw.iloc[0] * 100
+        fs = S.indicators(dfs["SPY"])
+        sst = fs.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).reindex(cal, method="ffill")
+        QS = mix([QQQ, SPY], [0.5, 0.5])
+        rows += [curve_row("SPY 보유", "S&P500 그냥 보유", SPY), curve_row("SPY · 4단계면 현금", "지난주 SPY가 4단계면 그 주는 현금", timed(SPY, sst)),
+                 curve_row("QQQ 50 + SPY 50", "4주마다 비중 맞춤", QS)]
+        core.update({"SPY": SPY, "QQQ·SPY 반반": QS})
     sats = {nm: (sat.reindex(cal, method="ffill").bfill()) for nm, sat in sats.items()}
     for nm, sat in sats.items():
         rows.append(curve_row(f"위성만: {nm}", "위성 전략 100%", sat / sat.iloc[0] * 100))
     for cn, cs in core.items():
         for nm, sat in sats.items():
-            for w in (((0.8, 0.2), (0.7, 0.3)) if cn == "QQQ" else ((0.8, 0.2),)):
+            for w in (((0.8, 0.2), (0.7, 0.3)) if cn == "QQQ" else ((0.8, 0.2), (0.7, 0.3), (0.5, 0.5)) if cn in ("SPY", "QQQ·SPY 반반") else ((0.8, 0.2),)):
                 rows.append(curve_row(f"코어 {cn} {int(w[0] * 100)} + {nm} {int(w[1] * 100)}", "4주마다 비중 맞춤", mix([cs, sat], list(w))))
     real = []
     if "TQQQ" in dfs and "QLD" in dfs:
@@ -2063,7 +2072,14 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     try:
-        lev[0].extend(fill_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+        ex_fill = []
+        sp = F("SPY")
+        if sp != "skip" and fill_i:
+            ex_fill.append(("S&P500(SPY)로 채움 · 차이 25%면 맞춤", dict(sp, band=25)))
+            qc, scl = dfs["QQQ"]["Close"], dfs["SPY"]["Close"].reindex(dfs["QQQ"].index, method="ffill")
+            blend = (1 + pd.concat([qc.pct_change(), scl.pct_change()], axis=1).mean(axis=1).fillna(0)).cumprod() * 100
+            ex_fill.append(("QQQ 반 + SPY 반으로 채움 · 차이 25%면 맞춤", dict(fill_i, o=blend.shift(1).bfill(), c=blend, band=25)))
+        lev[0].extend(fill_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, ex_fill))
     except Exception as ex:
         print("  남는 돈 비교 실패:", ex)
     try:
