@@ -460,6 +460,74 @@ def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
     return rows
 
 
+def pause_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+    """손절이 연속으로 나면 몇 주 쉬기(또는 위험 절반)가 나은지. 반환: 곡선 표 행"""
+    sig0 = base_run[0]
+    rows = []
+    vs = [("쉬지 않음 (지금)", None)] + [(f"{n}연속 손절 → {k}주 쉼", (n, k, "stop")) for n in (2, 3, 4) for k in (4, 8, 13)] + \
+         [(f"{n}연속 손절 → {k}주 위험 절반", (n, k, "half")) for n, k in ((2, 8), (3, 8), (3, 13))]
+    for nm, pz in vs:
+        e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, pause=pz)
+        rows.append(curve_row(f"[연속 손절] {nm}", f"쉰 횟수 {e_.attrs.get('n_pause', 0)}번 · 거래 {len(t_)}건 · 승률 {f_(stats_trades(t_).get('win'))}%", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    # 손절이 연속으로 난 뒤 다음 거래의 성과 (실제 거래 순서)
+    t0 = base_run[2].sort_values("entry_date") if len(base_run[2]) else None
+    if t0 is not None and "exit_date" in t0:
+        ex = t0.dropna(subset=["exit_date"]).sort_values("exit_date")
+        for n in (1, 2, 3):
+            nxt = []
+            for _, r in t0.iterrows():
+                prev = ex[ex["exit_date"] < r["entry_date"]].tail(n)
+                if len(prev) == n and (prev["R"] <= 0).all():
+                    nxt.append(r)
+            st = stats_trades(pd.DataFrame(nxt)) if nxt else dict(n=0)
+            print(f"  [연속 손절] 직전 {n}건이 모두 손절일 때 다음 거래: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R")
+    return rows
+
+
+def pullback_quality_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets):
+    """풀백 신호: RS가 떨어지는 중·고점이 낮아지는 중이면 성과가 나쁜지, 감점하면 포트폴리오가 나아지는지"""
+    for f in frames.values():
+        if "rs13d" not in f:
+            f["rs13d"] = f["rs"] - f["rs"].shift(13)
+            f["rs_off"] = f["rs"] - f["rs"].rolling(26, min_periods=8).max()
+            hi = f["high"]
+            f["lh_big"] = (hi.rolling(13).max() < hi.shift(13).rolling(26).max() * 0.97).astype(float)   # 최근 13주 고점이 그 전 26주 고점보다 3%+ 낮음
+    sig0 = base_run[0]
+    def at(col, df):
+        return np.array([frames[t][col].asof(d) for t, d in zip(df["ticker"], df["sig_date"])], dtype=float)
+    a = sig0[~sig0["dup"]].copy() if "dup" in sig0 else sig0.copy()
+    a = a[(a["signal"] == "풀백") & (a["ticker"].map(capmap) != "소형")]
+    if a.empty:
+        return []
+    a["rs13d"], a["rs_off"], a["lh"], a["lhb"], a["rs_"] = at("rs13d", a), at("rs_off", a), at("lh", a) if "lh" in next(iter(frames.values())) else np.nan, at("lh_big", a), at("rs", a)
+    fall = (a["rs13d"] <= -10)
+    off = (a["rs_off"] <= -20)
+    for lab, m in [("전체", a["rs13d"].notna()), ("RS 13주 동안 10 이상 하락", fall), ("RS 13주 변화 -10~0", (a["rs13d"] > -10) & (a["rs13d"] <= 0)), ("RS 13주 상승", a["rs13d"] > 0),
+                   ("RS가 26주 최고보다 20 이상 아래", off), ("RS 26주 최고 근처(-20 이내)", a["rs_off"] > -20),
+                   ("작은 고점이 낮아짐(LH)", a["lh"] == 1), ("큰 흐름 고점 낮아짐(13주 고점 < 그 전 26주 고점 -3%)", a["lhb"] == 1), ("큰 흐름 고점 낮아지지 않음", a["lhb"] == 0),
+                   ("RS 하락 + 큰 흐름 고점 낮아짐 (KRYS 유형)", fall & (a["lhb"] == 1)), ("둘 다 아님", ~fall & (a["lhb"] == 0))]:
+        st = stats_trades(a[m.fillna(False).astype(bool)])
+        buckets.append((f"[풀백 품질] {lab} (대·중형, {ms0}점 이상 포함 전체 신호)", st))
+        print(f"  [풀백 품질] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    rows = []
+    s_all = sig0.copy()
+    pb = (s_all["signal"] == "풀백")
+    rsd, lhb = at("rs13d", s_all), at("lh_big", s_all)
+    for nm, cond, pts in (("감점 없음 (지금)", None, 0), ("RS 13주 -10 이상 하락 풀백 -8", rsd <= -10, 8), ("큰 흐름 고점 낮아진 풀백 -8", lhb == 1, 8),
+                          ("RS 하락 + 고점 낮아짐 풀백 -10", (rsd <= -10) & (lhb == 1), 10)):
+        sg = s_all.copy()
+        if cond is not None:
+            sg.loc[pb & cond, "score"] = sg.loc[pb & cond, "score"] - pts
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[풀백 품질] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · 2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    return rows
+
+
 def universe_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, srcmap):
     """종목 범위별 같은 전략: 원래 지수 목록만 / + 해외 ADR / + 나스닥 시총 2조원+ 추가 종목. 반환: 곡선 표 행"""
     sig0, eq0, _ = base_run
@@ -1015,13 +1083,15 @@ def _victim(pos, frames, d, mode, new_score):
     return best
 
 
-def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None):
+def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None, pause=None):
+    """pause: (n, k, mode) 손절(R<=0)이 n번 연속이면 mode='stop': k주 동안 신규 매수 쉼 / 'half': k주 동안 위험을 절반으로"""
     """order: 같은 주·같은 점수일 때 이 열이 작은 신호부터 (예: beta)
        추매 행(add=True): 같은 종목을 들고 있을 때만 사고, 종목 수에 세지 않음 · 수량은 위험 절반, 비중 상한 절반
     fill: 남는 돈을 ETF로 채우기. dict(o=시가, c=종가, mkt=시장 단계, frac=채울 비율, half3=3단계면 절반, filt=4단계면 매도, band=리밸런싱 폭%)"""
     mp = max_pos or BT["max_pos"]
     etf_sh, inv_sum = 0.0, 0.0
     etf_tx = 0                                       # ETF 사고판 횟수 (리밸런싱·매수 자금 마련 매도)
+    streak, pause_until, n_pause = 0, None, 0        # 연속 손절 수, 쉬는 기간 끝, 쉰 횟수
     cands = sig[(sig["score"] >= min_score)]
     if order:
         cands = cands.sort_values(["entry_date", "score", order], ascending=[True, False, True])
@@ -1056,7 +1126,8 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 etf_sh = target / eo
                 etf_tx += 1
         # 1) 이번 주 시가 매수 (지난주까지의 자금으로), 자리가 꽉 찼으면 갈아타기 규칙 확인
-        if d in by_week:
+        paused = pause is not None and pause_until is not None and d < pause_until
+        if d in by_week and not (paused and pause[2] == "stop"):
             for _, r in by_week[d].iterrows():
                 is_add = r.get("add") == True                # 추매가 아닌 행은 NaN일 수 있음 (bool(NaN)은 참)
                 key = r["ticker"] + "+" if is_add else r["ticker"]
@@ -1088,7 +1159,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 risk_ps = r["entry"] - r["stop0"]
                 if risk_ps <= 0:
                     continue
-                k_ = 0.5 if is_add else 1.0
+                k_ = (0.5 if is_add else 1.0) * (0.5 if paused and pause[2] == "half" else 1.0)
                 shares = equity * BT["risk_pct"] * k_ / 100 / risk_ps
                 liquid = cash + (etf_sh * eo if eo is not None else 0)
                 val = min(shares * r["entry"], equity * wcap * k_ / 100, liquid / (1 + 2 * cost))
@@ -1109,6 +1180,10 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 cash += p["shares"] * p["exit"] * (1 - cost)
                 trades.append(p["r"])
                 del pos[t]
+                if pause is not None and not p.get("add"):
+                    streak = streak + 1 if p["r"]["R"] <= 0 else 0
+                    if streak >= pause[0]:
+                        pause_until, streak, n_pause = d + pd.Timedelta(weeks=pause[1]), 0, n_pause + 1
         # 3) 주말 평가
         mv = 0.0
         for t, p in pos.items():
@@ -1123,6 +1198,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
         curve.append((d, equity, len(pos), mv / equity * 100 if equity else 0, ev / equity * 100 if equity else 0))
     eq = pd.DataFrame(curve, columns=["date", "equity", "n", "stk", "etf"]).set_index("date")
     eq.attrs["etf_tx"] = etf_tx
+    eq.attrs["n_pause"] = n_pause
     return eq, pd.DataFrame(trades)
 
 
@@ -2032,6 +2108,14 @@ def main(argv=None, fetch=None, universe=None):
                                    args.min_score, mp_i, fill_i, ms_i, capmap, allsig, at, buckets))
     except Exception as ex:
         print("  전고점 매물 분석 실패:", ex)
+    try:
+        lev[0].extend(pause_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  연속 손절 비교 실패:", ex)
+    try:
+        lev[0].extend(pullback_quality_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, buckets))
+    except Exception as ex:
+        print("  풀백 품질 비교 실패:", ex)
     try:
         event_study(allsig, capmap, buckets)
     except Exception as ex:
