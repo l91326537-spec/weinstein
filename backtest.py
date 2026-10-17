@@ -441,6 +441,28 @@ def event_study(allsig, capmap, buckets, days=90):
         print(f"  [이벤트 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
 
 
+def sizing_study(frames, cal, base_run, ms0, fill, msmall, capmap):
+    """종목 수·한 번 손절 위험·한 종목 상한 조합별 결과. 반환: 곡선 표 행"""
+    sig0 = base_run[0]
+    rows = []
+    old_r, old_w = BT["risk_pct"], BT["max_weight"]
+    grid = [(6, 1.0, 25), (4, 1.0, 25), (5, 1.0, 25), (8, 1.0, 25), (10, 1.0, 25),
+            (6, 1.5, 25), (6, 2.0, 25), (5, 1.5, 25), (4, 2.0, 25), (8, 1.5, 25), (6, 1.0, 20), (6, 1.5, 20)]
+    try:
+        for mp_, rk, mw in grid:
+            BT["risk_pct"], BT["max_weight"] = rk, mw
+            e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp_, fill=fill, max_small=msmall, caps=capmap)
+            cap = min(mw, 100 / mp_)
+            rows.append(curve_row(f"[비중] 최대 {mp_}종목 · 손절 위험 {rk:g}% · 한 종목 최대 {cap:.0f}%",
+                                  f"평균 보유 {e_['n'].mean():.1f}종목 · 개별주 평균 {e_['stk'].mean():.0f}% · 거래 {len(t_)}건", e_["equity"]))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    finally:
+        BT["risk_pct"], BT["max_weight"] = old_r, old_w
+    return rows
+
+
 def fill_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, extra=()):
     """남는 돈 처리: QQQ로 채우기(지금) vs 현금으로 두기 vs 리밸런싱 폭을 넓혀 QQQ 매매 줄이기. 반환: 곡선 표 행"""
     sig0 = base_run[0]
@@ -2071,6 +2093,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(sizing_study(frames, cal, runs[ib], args.min_score, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  비중 비교 실패:", ex)
     try:
         ex_fill = []
         sp = F("SPY")
