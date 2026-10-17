@@ -441,6 +441,53 @@ def event_study(allsig, capmap, buckets, days=90):
         print(f"  [이벤트 거래량] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
 
 
+def breadth_study(frames, cal, dfs, market, base_run, ms0, mp, fill, msmall, capmap):
+    """와인스타인식 시장 폭: 30주선 위 종목 비율, 52주 신고가-신저가. 지수 4단계 전에 미리 팔기 / 4단계 중에 미리 다시 사기"""
+    C = pd.concat({t: f["close"] for t, f in frames.items()}, axis=1).reindex(cal)
+    M = pd.concat({t: f["ma30"] for t, f in frames.items()}, axis=1).reindex(cal)
+    H = pd.concat({t: f["high"].rolling(52, min_periods=40).max() for t, f in frames.items()}, axis=1).reindex(cal)
+    L = pd.concat({t: f["low"].rolling(52, min_periods=40).min() for t, f in frames.items()}, axis=1).reindex(cal)
+    Hi = pd.concat({t: f["high"] for t, f in frames.items()}, axis=1).reindex(cal)
+    Lo = pd.concat({t: f["low"] for t, f in frames.items()}, axis=1).reindex(cal)
+    ok = C.notna() & M.notna()
+    n = ok.sum(axis=1).replace(0, np.nan)
+    pa = ((C > M) & ok).sum(axis=1) / n * 100                         # 30주선 위 종목 비율 %
+    nhnl = (((Hi >= H) & ok).sum(axis=1) - ((Lo <= L) & ok).sum(axis=1)) / n * 100
+    nh4 = nhnl.rolling(4, min_periods=1).mean()
+    pa10 = pa.rolling(10, min_periods=4).mean()
+    fall, rise = pa < pa10, pa > pa10
+    mk = market.reindex(cal, method="ffill")
+    m4 = mk == 4
+    print(f"  [시장 폭] 30주선 위 종목 비율 평균 {pa.mean():.0f}% · 최저 {pa.min():.0f}% ({pa.idxmin().date()}) · 지수 4단계 기간 {m4.mean() * 100:.0f}%")
+    rules = [("지수 4단계면 매도 (지금)", m4),
+             ("+ 30주선 위 비율 40% 미만·하락 중이면 미리 매도", m4 | ((pa < 40) & fall)),
+             ("+ 30주선 위 비율 35% 미만·하락 중이면 미리 매도", m4 | ((pa < 35) & fall)),
+             ("+ 신고가-신저가(4주 평균) -3% 미만이면 미리 매도", m4 | (nh4 < -3)),
+             ("4단계라도 30주선 위 비율 50% 넘고 상승 중이면 다시 매수", m4 & ~((pa > 50) & rise)),
+             ("4단계라도 30주선 위 비율 60% 넘으면 다시 매수", m4 & ~(pa > 60)),
+             ("미리 매도(40%·하락) + 미리 매수(50%·상승)", (m4 & ~((pa > 50) & rise)) | (~m4 & (pa < 40) & fall)),
+             ("미리 매도(신고가-신저가) + 미리 매수(50%·상승)", (m4 & ~((pa > 50) & rise)) | (~m4 & (nh4 < -3)))]
+    rows = []
+    qw = dfs["QQQ"]["Close"].reindex(cal, method="ffill") if "QQQ" in dfs else None
+    for nm, out in rules:
+        out = out.fillna(False).astype(bool)
+        st = pd.Series(np.where(out, 4, 2), index=cal)
+        sw = int((out != out.shift(1)).sum())
+        if qw is not None:
+            q = timed(qw / qw.iloc[0] * 100, st)
+            rows.append(curve_row(f"[시장 폭] QQQ만 · {nm}", f"현금 기간 {out.mean() * 100:.0f}% · 바꾼 횟수 {sw}번", q))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+        if fill:
+            e_, t_ = run_portfolio(base_run[0], frames, cal, ms0, max_pos=mp, fill=dict(fill, mkt=st), max_small=msmall, caps=capmap)
+            rows.append(curve_row(f"[시장 폭] 전략(남는 돈 QQQ) · {nm}", f"QQQ 현금 기간 {out.mean() * 100:.0f}% · 거래 {len(t_)}건", e_["equity"]))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    return rows
+
+
 def sizing_study(frames, cal, base_run, ms0, fill, msmall, capmap):
     """종목 수·한 번 손절 위험·한 종목 상한 조합별 결과. 반환: 곡선 표 행"""
     sig0 = base_run[0]
@@ -2099,6 +2146,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(breadth_study(frames, cal, dfs, market, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  시장 폭 비교 실패:", ex)
     try:
         lev[0].extend(sizing_study(frames, cal, runs[ib], args.min_score, fill_i, ms_i, capmap))
     except Exception as ex:
