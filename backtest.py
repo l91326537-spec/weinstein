@@ -278,7 +278,8 @@ def ma_touch_study(frames, start, capmap, n=60, stop_pct=5.0, above_weeks=8):
             ent, ex, e_, px, R, wk, why, _ = tr
             busy = f.index.get_loc(ex) if ex is not None else N
             rows.append(dict(ticker=t, sig_date=f.index[i], R=R, ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why,
-                             sm=capmap.get(t) == "소형", st=stg[i], rs=rs[i], u30=c[i] < ma30[i] if not math.isnan(ma30[i]) else False))
+                             sm=capmap.get(t) == "소형", st=stg[i], rs=rs[i], u30=c[i] < ma30[i] if not math.isnan(ma30[i]) else False,
+                             entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0, mkt=f["mkt"].iloc[i] if "mkt" in f else np.nan))
     return pd.DataFrame(rows)
 
 
@@ -485,6 +486,35 @@ def breadth_study(frames, cal, dfs, market, base_run, ms0, mp, fill, msmall, cap
             r_ = rows[-1]
             print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
                   f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    return rows
+
+
+def touch10_portfolio_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap):
+    """10주선 터치 매수를 앱 신호에 더했을 때 포트폴리오 (대·중형 · 2단계 · RS 0+ · 30주선 위 · 시장 4단계 아님)"""
+    sig0 = base_run[0]
+    rows = []
+    base = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+    rows.append(curve_row("[10주선 포트폴리오] 지금 신호만", f"거래 {len(base[1])}건", base[0]["equity"]))
+    for sp in (5.0, 8.0):
+        mt = ma_touch_study(frames, start, capmap, n=10, stop_pct=sp)
+        if mt.empty:
+            continue
+        ok = (~mt["sm"]) & (mt["st"] == 2) & (mt["rs"] >= 0) & (~mt["u30"]) & (mt["mkt"] != 4)
+        t10 = mt[ok].copy()
+        t10["signal"], t10["kind"], t10["dup"], t10["stage_label"] = "10주선", "T10", False, "2단계"
+        print(f"  [10주선 포트폴리오] 손절 -{sp:.0f}% 조건 맞는 신호 {len(t10)}건 · 평균 {f_(stats_trades(t10).get('avgR'))}R")
+        for nm, sc, only in (("지금 신호 + 10주선(점수 80, 같은 순위)", 80, False), ("지금 신호 + 10주선(점수 95, 먼저 삼)", 95, False),
+                             ("지금 신호 + 10주선(점수 70, 남는 자리만)", ms0 - 0.5, False), ("10주선 신호만", 80, True)):
+            t_ = t10.copy(); t_["score"] = sc
+            cols = [c for c in sig0.columns if c in t_.columns]
+            sg = t_[cols] if only else pd.concat([sig0, t_[cols]], ignore_index=True)
+            mn = min(ms0, sc) if sc < ms0 else ms0
+            e_, tr_ = run_portfolio(sg, frames, cal, mn, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+            k10 = int((tr_["signal"] == "10주선").sum()) if len(tr_) else 0
+            rows.append(curve_row(f"[10주선 포트폴리오] 손절 -{sp:.0f}% · {nm}", f"거래 {len(tr_)}건 (10주선 {k10}건) · 승률 {f_(stats_trades(tr_).get('win'))}%", e_["equity"]))
+    for r_ in rows:
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
     return rows
 
 
@@ -2146,6 +2176,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(touch10_portfolio_study(frames, cal, start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  10주선 포트폴리오 실패:", ex)
     try:
         lev[0].extend(breadth_study(frames, cal, dfs, market, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
