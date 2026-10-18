@@ -489,6 +489,85 @@ def breadth_study(frames, cal, dfs, market, base_run, ms0, mp, fill, msmall, cap
     return rows
 
 
+def add_rows(frames, sig, line_n=10, strong=True):
+    """보유 중 +5% 수익인 종목이 n주선(강한 종목: RS>0·n주선 상승 중)에 닿으면 추매. 손절 = 그 선 -5%. 원래 포지션과 함께 정리"""
+    out = []
+    for _, r in sig.iterrows():
+        f = frames.get(r["ticker"])
+        if f is None or r["entry_date"] not in f.index:
+            continue
+        j0 = f.index.get_loc(r["entry_date"])
+        has_ex = pd.notna(r["exit_date"])
+        ex = f.index.get_loc(r["exit_date"]) if has_ex and r["exit_date"] in f.index else len(f) - 1
+        o, lo, c = f["open"].values, f["low"].values, f["close"].values
+        line = f["close"].rolling(line_n).mean().values if line_n != 30 else f["ma30"].values
+        rs = f["rs"].values
+        for k in range(j0 + 2, ex):
+            ln = line[k - 1]
+            if math.isnan(ln) or c[k - 1] <= r["entry"] * 1.05 or c[k - 1] <= ln * 1.01:
+                continue
+            if strong and not (rs[k - 1] > 0 and line[k - 1] > line[k - 2]):
+                continue
+            if lo[k] <= ln * 1.01:
+                px = min(o[k], ln * 1.01); st = ln * 0.95
+                tr = _hold_from(f, k, px, st, True, None)
+                xd, xp = tr[1], tr[3]
+                if has_ex and (xd is None or xd > r["exit_date"]):
+                    xd, xp = r["exit_date"], r["exit"]
+                out.append(dict(ticker=r["ticker"], sig_date=f.index[k], entry_date=f.index[k], exit_date=xd, entry=px, exit=xp, stop0=st,
+                                R=(xp - px) / (px - st), ret=(xp / px - 1) * 100 - 2 * BT["cost_pct"], weeks=0, why="추매",
+                                score=r["score"], signal="추매", stage_label=r.get("stage_label"), dup=False, kind="ADD", add=True))
+                break
+    return pd.DataFrame(out)
+
+
+def take_profit(frames, sig, pct):
+    """수익이 pct% 나면 그 가격에 팔기 (원래 청산보다 먼저 닿으면)"""
+    s2 = sig.copy()
+    for i, r in s2.iterrows():
+        f = frames.get(r["ticker"])
+        if f is None or r["entry_date"] not in f.index:
+            continue
+        j0 = f.index.get_loc(r["entry_date"])
+        ex = f.index.get_loc(r["exit_date"]) if pd.notna(r["exit_date"]) and r["exit_date"] in f.index else len(f) - 1
+        tgt = r["entry"] * (1 + pct / 100)
+        hi = f["high"].values
+        for k in range(j0 + 1, ex + 1):
+            if hi[k] >= tgt:
+                px = max(tgt, f["open"].values[k])
+                s2.at[i, "exit_date"], s2.at[i, "exit"] = f.index[k], px
+                s2.at[i, "R"] = (px - r["entry"]) / (r["entry"] - r["stop0"]) if r["entry"] > r["stop0"] else 0
+                s2.at[i, "ret"] = (px / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
+                break
+    return s2
+
+
+def addon_profit_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+    """추매(10주선·30주선)와 '조금 오르면 팔기'(익절)·갈아타기를 포트폴리오로 비교"""
+    sig0 = base_run[0]
+    rows = []
+    def run(nm, sg, **kw):
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, **kw)
+        na = int((t_["signal"] == "추매").sum()) if len(t_) and "signal" in t_ else 0
+        rows.append(curve_row(nm, f"거래 {len(t_)}건 (추매 {na}건) · 승률 {f_(stats_trades(t_).get('win'))}%", e_["equity"]))
+    run("[추매·익절] 지금 (추매 없음, 4단계·손절까지 보유)", sig0)
+    a10 = add_rows(frames, sig0, 10, True)
+    a30 = add_rows(frames, sig0, 30, False)
+    print(f"  [추매·익절] 추매 후보 10주선 {len(a10)}건 · 30주선 {len(a30)}건")
+    if len(a10):
+        run("[추매·익절] + 10주선 추매 (수익 +5%·RS>0, 위험 절반)", pd.concat([sig0, a10], ignore_index=True))
+    if len(a30):
+        run("[추매·익절] + 30주선 추매 (수익 +5%, 위험 절반)", pd.concat([sig0, a30], ignore_index=True))
+    for pct in (10, 20, 30, 50):
+        run(f"[추매·익절] +{pct}% 오르면 팔기 (익절)", take_profit(frames, sig0, pct))
+    run("[추매·익절] 더 좋은 신호가 오면 약한 보유 종목 팔고 갈아타기", sig0, rotate="weak", rot_min=85)
+    run("[추매·익절] 25점 이상 높은 신호가 오면 갈아타기", sig0, rotate="gap", rot_min=85)
+    for r_ in rows:
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    return rows
+
+
 def touch10_portfolio_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap):
     """10주선 터치 매수를 앱 신호에 더했을 때 포트폴리오 (대·중형 · 2단계 · RS 0+ · 30주선 위 · 시장 4단계 아님)"""
     sig0 = base_run[0]
@@ -2176,6 +2255,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(addon_profit_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  추매·익절 비교 실패:", ex)
     try:
         lev[0].extend(touch10_portfolio_study(frames, cal, start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
