@@ -12,7 +12,7 @@
       python backtest.py --quick        (나스닥100만, 빠른 확인)
       python backtest.py --start 2010-01-01 --min-score 80
 """
-import argparse, datetime as dt, html, math, os, sys
+import argparse, datetime as dt, html, math, os, sys, time
 
 import numpy as np
 import pandas as pd
@@ -540,6 +540,50 @@ def take_profit(frames, sig, pct):
                 s2.at[i, "ret"] = (px / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
                 break
     return s2
+
+
+def robust_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=20):
+    """경로 의존성 확인: 시작 주(0~52주 늦춤)와 같은 주 신호 순서(점수 ±3 흔들기)를 무작위로 바꿔 n번 돌린 연평균 분포. 반환: 표 행"""
+    sig0 = base_run[0]
+    cap = sig0["ticker"].map(capmap)
+    evr = np.array([frames[t]["vr"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["entry_date"])], dtype=float)
+    bl = np.array([frames[t]["base_len"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    rs = np.array([frames[t]["rs"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    a_ = sig0["kind"].isin(["B12", "B2"]).values & (cap != "소형").values & (bl >= 26) & (evr >= 2) & (rs >= 0)
+    sets = [("지금", sig0, mp, None), ("대형만", sig0[cap == "대형"], mp, None), ("중형만", sig0[cap == "중형"], mp, None),
+            ("A급 돌파만 · 4종목 · 25%", sig0[a_].assign(score=100.0), 4, 25)]
+    rng = np.random.default_rng(7)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    old_w = BT["max_weight"]
+    try:
+        for nm, sg, mp_, mw in sets:
+            t0 = time.time()
+            BT["max_weight"] = mw or old_w
+            cg, md = [], []
+            for k, seed in plan:
+                if time.time() - t0 > 480:                    # 한 묶음에 8분 넘으면 여기까지
+                    break
+                r2 = np.random.default_rng(seed)
+                cal2 = cal[k:]
+                sg2 = sg[sg["entry_date"] >= cal2[0]]
+                sg2 = sg2.assign(rk=r2.random(len(sg2)))
+                if mw is None:                                # A급은 모두 100점이라 순서만 무작위
+                    sg2["score"] = np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100)
+                e_, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp_, fill=fill, max_small=msmall, caps=capmap, order="rk")
+                c_ = stats_curve(e_["equity"])
+                cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+            cg, md = np.array(cg, float), np.array(md, float)
+            if not len(cg):
+                continue
+            row = dict(name=nm, n=len(cg), med=np.nanmedian(cg), p10=np.nanpercentile(cg, 10), p90=np.nanpercentile(cg, 90),
+                       mdd_med=np.nanmedian(md), mdd_p10=np.nanpercentile(md, 10))
+            rows.append(row)
+            print(f"  [흔들기 {len(cg)}번] {nm}: 연평균 중앙값 {f_(row['med'])}% · 하위 10% {f_(row['p10'])}% · 상위 10% {f_(row['p90'])}% · "
+                  f"최대낙폭 중앙값 {f_(row['mdd_med'])}% · 나쁜 쪽 10% {f_(row['mdd_p10'])}%")
+    finally:
+        BT["max_weight"] = old_w
+    return rows
 
 
 def pit_size_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets):
@@ -2471,6 +2515,10 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
+    try:
+        robust_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
+    except Exception as ex:
+        print("  흔들기 비교 실패:", ex)
     try:
         lev[0].extend(pit_size_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
