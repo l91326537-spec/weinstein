@@ -542,6 +542,47 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def swap_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+    """자리가 꽉 찼을 때 '확실히 좋은' 새 신호면 가장 약한 보유 종목을 팔고 갈아타기.
+       확실히 좋은 = 1→2단계 돌파 · 대·중형 · 기저 26주+ · RS 0+ · (돌파 주 거래량 2배+) · (업종이 최근 13주 안에 1→2단계로 전환). 반환: 곡선 표 행"""
+    sig0 = base_run[0]
+    at = lambda col, dcol: np.array([frames[t][col].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0[dcol])], dtype=float)
+    evr, bl, rs, ss = at("vr", "entry_date"), at("base_len", "sig_date"), at("rs", "sig_date"), at("sec_stage", "sig_date")
+    def sec_turn(t, d):
+        f = frames.get(t)
+        if f is None:
+            return False
+        x = f["sec_stage"].loc[:d].tail(14)
+        return len(x) > 1 and x.iloc[-1] == 2 and (x.iloc[:-1] == 1).any()
+    turn = np.array([sec_turn(t, d) for t, d in zip(sig0["ticker"], sig0["sig_date"])])
+    b12 = (sig0["kind"] == "B12").values & (sig0["ticker"].map(capmap) != "소형").values & (bl >= 26) & (rs >= 0)
+    grades = {"A급 + 업종 1→2 전환": b12 & (evr >= 2) & turn, "A급 (업종 조건 없음)": b12 & (evr >= 2),
+              "A급 + 업종 전환 (거래량 조건 없음)": b12 & turn}
+    for nm, m in grades.items():
+        st = stats_trades(sig0[m & ~sig0["dup"].values])
+        print(f"  [갈아타기 A급] 신호 · {nm}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    orig = {(r.ticker, r.entry_date): r.R for r in sig0.itertuples()}
+    rows = []
+    e0, t0 = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+    rows.append(curve_row("[갈아타기 A급] 지금 (갈아타기 없음)", f"거래 {len(t0)}건", e0["equity"]))
+    for gnm in grades:
+        for mode, mlab in (("worst", "점수 가장 낮은 종목"), ("worst_r", "수익률 가장 낮은 종목"), ("weak", "약해진 종목만")):
+            if gnm != "A급 + 업종 1→2 전환" and mode != "worst":
+                continue
+            sg = sig0.assign(rot_ok=grades[gnm])
+            e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, rotate=mode, rot_min=0, fill=fill, max_small=msmall, caps=capmap)
+            sw = t_[t_["why"] == "갈아타기"] if len(t_) else t_
+            lost = [orig.get((r.ticker, r.entry_date), np.nan) for r in sw.itertuples()] if len(sw) else []
+            got = t_[t_["entry_date"].isin(sw["exit_date"]) & (t_["why"] != "갈아타기")] if len(sw) else sw   # 갈아탄 주에 새로 산 종목 (근사)
+            rows.append(curve_row(f"[갈아타기 A급] {gnm} 오면 {mlab} 팔기", f"갈아타기 {len(sw)}번 · 거래 {len(t_)}건", e_["equity"]))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+            if len(sw):
+                print(f"    판 종목: 판 시점 평균 {sw['R'].mean():.2f}R · 계속 들고 있었다면 평균 {np.nanmean(lost):.2f}R  |  그 주 새로 산 종목 평균 {got['R'].mean():.2f}R ({len(got)}건)")
+    return rows
+
+
 def robust_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=20):
     """경로 의존성 확인: 시작 주(0~52주 늦춤)와 같은 주 신호 순서(점수 ±3 흔들기)를 무작위로 바꿔 n번 돌린 연평균 분포. 반환: 표 행"""
     sig0 = base_run[0]
@@ -1544,6 +1585,10 @@ def _victim(pos, frames, d, mode, new_score):
         sc = -1 if pd.isna(sc) else sc
         if mode == "weak":
             ok = sc < 50 or st == 3 or (pd.notna(rs) and pd.notna(rs4) and rs < 0 and rs < rs4) or ss in (3, 4)
+        elif mode == "worst":   # 조건 없이 지금 점수가 가장 낮은 종목
+            ok = True
+        elif mode == "worst_r":  # 조건 없이 수익률이 가장 낮은 종목 (점수 대신 수익률로 비교)
+            ok, sc = True, f["close"].iloc[i] / p["r"]["entry"] - 1
         else:   # "gap": 새 종목보다 25점 이상 낮은 종목
             ok = new_score - sc >= 25
         if ok and (best is None or sc < best_sc):
@@ -1605,7 +1650,7 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 if not is_add and max_small is not None and caps.get(r["ticker"]) == "소형" and sum(caps.get(x) == "소형" for x in pos) >= max_small:
                     continue
                 if not is_add and nbase >= mp:
-                    if not rotate or r["score"] < rot_min:
+                    if not rotate or r["score"] < rot_min or not (r["rot_ok"] == True if "rot_ok" in r.index else True):
                         continue
                     v = _victim(pos, frames, d, rotate, r["score"])
                     if v is None:
@@ -2515,6 +2560,10 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
+    try:
+        lev[0].extend(swap_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  A급 갈아타기 비교 실패:", ex)
     try:
         robust_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
     except Exception as ex:
