@@ -1771,7 +1771,7 @@ def write_report(path, args, curves, cstats, tstats, variants, buckets, sigtab, 
             P.append("<div class=card style='margin-top:8px'>" + line_svg(imp_curves) + "</div>")
     if seg:
         P.append(f"<h2>대형 · 중형 · 소형 비교</h2><div class=mut style='margin-bottom:6px'>{e(best or '')} 규칙으로 크기별 종목만 따로 돌린 결과. "
-                 "대형=S&P500·나스닥100, 중형=S&P400, 소형=러셀2000. 소형주일수록 생존 편향이 커서 실제보다 좋게 나오는 점을 감안하세요.</div>"
+                 "대형=S&P500·나스닥100·지수 밖 시총 100억 달러+·해외 대형 ADR, 중형=S&P400·지수 밖 시총 15억~100억 달러·해외 중형 ADR, 소형=러셀2000 (모두 지금 기준). 소형주일수록 생존 편향이 커서 실제보다 좋게 나오는 점을 감안하세요.</div>"
                  "<div class=tw><table><tr><th class=l>구분</th><th>종목 수</th><th>연평균</th><th>최대 낙폭</th><th>거래</th><th>승률</th><th>평균 R</th><th>신호당 평균 R</th><th>신호 3R 이상</th></tr>")
         for r in seg:
             P.append(f"<tr><td class=l><b>{e(r['name'])}</b></td><td>{r['n_t']}</td><td>{sgn(r['c'].get('cagr'))}</td><td>{sgn(r['c'].get('mdd'))}</td>"
