@@ -270,6 +270,25 @@ function chartStep(td, view, act) {
 }
 
 /* ---------- 화면: 홈 ---------- */
+/* 시장 위험 신호 (참고): 30주선 위 종목 비율, 신고가-신저가, 업종 단계 분포. 매매 규칙에는 쓰지 않음 */
+function breadthCard(b) {
+  if (!b) return "";
+  const h = (b.hist || []).filter(x => x != null), W = 300, H = 90;
+  const y = x => H - 4 - x / 100 * (H - 8), dx = h.length > 1 ? W / (h.length - 1) : 0;
+  const path = h.map((x, i) => `${i ? "L" : "M"}${(i * dx).toFixed(1)},${y(x).toFixed(1)}`).join("");
+  const svg = h.length > 1 ? `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:90px" aria-label="30주선 위 종목 비율 52주">
+    <line x1="0" x2="${W}" y1="${y(40)}" y2="${y(40)}" stroke="var(--s4)" stroke-dasharray="4 4" stroke-width="1"/>
+    <line x1="0" x2="${W}" y1="${y(60)}" y2="${y(60)}" stroke="var(--s2)" stroke-dasharray="4 4" stroke-width="1"/>
+    <path d="${path}" fill="none" stroke="var(--fg)" stroke-width="1.6"/></svg>` : "";
+  const tone = b.warn && b.warn.length ? "warn" : "ok";
+  return `<section class="card"><div class="row between"><h3>시장 위험 신호</h3><span class="tag ${tone === "ok" ? "good" : ""}">${tone === "ok" ? "특이 신호 없음" : `경고 ${b.warn.length}개`}</span></div>
+    <div class="kv"><div><span>30주선 위 종목</span><b>${b.pa ?? "–"}%</b><small>10주 평균 ${b.pa10 ?? "–"}%</small></div>
+      <div><span>신고가−신저가</span><b>${b.nhnl4 == null ? "–" : (b.nhnl4 > 0 ? "+" : "") + b.nhnl4}%</b><small>4주 평균</small></div>
+      <div><span>업종 2단계/4단계</span><b>${b.sec2}/${b.sec4}</b><small>전체 ${b.secN}개</small></div></div>
+    ${svg}<p class="note">30주선 위 종목 비율 52주 (점선: 위 60%, 아래 40%)</p>
+    ${(b.warn || []).map(w => `<div class="warn">${esc(w)}</div>`).join("")}
+    <p class="note">와인스타인이 시장을 볼 때 쓴 '시장 폭' 지표예요. 참고용이며 매매 규칙에는 쓰지 않아요. 백테스트에서 이 지표로 QQQ를 미리 사고팔면 지금 규칙(지수 4단계면 매도)보다 일관되게 낫지 않았어요. 여러 경고가 함께 뜨면 새 매수를 조심스럽게 보세요.</p></section>`;
+}
 async function viewHome(v) {
   const mk = SUM.market, worst = SUM.worst;
   const mrow = Object.entries(mk).filter(([, m]) => m).map(([t, m]) => `<div class="row between"><span>${esc(m.name)}</span><span class="row">${pill(m.stage, m.label)}<span class="mono muted" style="font-size:12px">30주선 ${pct(m.ext)}</span></span></div>`).join("");
@@ -281,6 +300,7 @@ async function viewHome(v) {
   <section class="card"><h3>시장</h3>${mrow}
     ${worst === 4 ? `<div class="warn">시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>` : worst === 3 ? `<div class="warn">시장 3단계: 매수 규모 축소, 손절 좁히기</div>` : ""}
   </section>
+  ${breadthCard(SUM.breadth)}
   <section class="card" id="alerts" hidden></section>
   <section class="card"><div class="row between"><h2>지금 볼 후보</h2><a class="btn sm" href="#cands">전체</a></div>
     ${top.length ? `<div class="list">${top.map((c, i) => candItem(c, i + 1)).join("")}</div>` : `<p class="note">이번 주 돌파·풀백 신호가 없습니다.</p>`}

@@ -105,6 +105,38 @@ def stock_payload(r):
     return d
 
 
+def market_breadth(dfs, uni, sectors, weeks=52):
+    """와인스타인식 시장 폭 (참고용): 30주선 위 종목 비율, 52주 신고가-신저가, 업종 ETF 단계 분포"""
+    C, M, NH, NL = {}, {}, {}, {}
+    for t, info in uni.items():
+        df = dfs.get(t)
+        if info.get("bench") != "us" or df is None or len(df) < 60:
+            continue
+        c, h, l = df["Close"], df["High"], df["Low"]
+        C[t], M[t] = c, c.rolling(30).mean()
+        NH[t] = (h >= h.rolling(52, min_periods=40).max()).astype(float)
+        NL[t] = (l <= l.rolling(52, min_periods=40).min()).astype(float)
+    if len(C) < 50:
+        return None
+    C, M, NH, NL = (pd.concat(x, axis=1).iloc[-(weeks + 10):] for x in (C, M, NH, NL))
+    ok = C.notna() & M.notna()
+    n = ok.sum(axis=1).replace(0, np.nan)
+    pa = ((C > M) & ok).sum(axis=1) / n * 100
+    nhnl = ((NH.where(ok) .sum(axis=1)) - (NL.where(ok).sum(axis=1))) / n * 100
+    pa10, nh4 = pa.rolling(10, min_periods=4).mean(), nhnl.rolling(4, min_periods=1).mean()
+    st = [v.get("stage") for k, v in sectors.items()]
+    now, p10, n4 = float(pa.iloc[-1]), float(pa10.iloc[-1]), float(nh4.iloc[-1])
+    warn = []
+    if now < 40 and now < p10:
+        warn.append(f"30주선 위 종목이 {now:.0f}%로 40% 아래이고 줄어드는 중")
+    if n4 < -3:
+        warn.append(f"52주 신저가 종목이 신고가보다 많음 (4주 평균 {n4:+.1f}%)")
+    if st and st.count(4) > st.count(2):
+        warn.append(f"4단계 업종({st.count(4)}개)이 2단계 업종({st.count(2)}개)보다 많음")
+    return dict(pa=r2(now, 1), pa10=r2(p10, 1), nhnl4=r2(n4, 1), sec2=st.count(2), sec4=st.count(4), secN=len(st),
+                hist=[r2(x, 1) for x in pa.iloc[-weeks:].tolist()], warn=warn, n=int(n.iloc[-1]))
+
+
 def mcint(x):
     return int(x) if x is not None and not pd.isna(x) else None
 
@@ -174,10 +206,11 @@ def main(fetch=None, universe=None):
         d = stock_payload(r)
         d.update(t=r["ticker"], f=safe(r["ticker"]), n=str(r["name"]), s=r.get("sector_ko"), cap=r.get("cap"), mc=mcint(r.get("mcap")), mine=r.get("mine"))
         cands.append(d)
+    breadth = market_breadth(dfs, uni, R["sectors"])
     fx = r2(dfs["KRW=X"]["Close"].iloc[-1], 1) if "KRW=X" in dfs else None
     summary = dict(fx=fx, updated=dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"), day=R["day"],
                    weekComplete=week_complete(), lastBar=str(dfs["^GSPC"].index[-1].date()) if "^GSPC" in dfs else None,
-                   market=mk, worst=R["worst"], sectors=secs, candidates=cands,
+                   market=mk, worst=R["worst"], breadth=breadth, sectors=secs, candidates=cands,
                    index=sorted(index, key=lambda x: x["t"]),
                    counts=dict(total=len(rows), universe=len(uni), **{c: sum(1 for r in rows if r.get("cap") == c) for c in ("대형", "중형", "소형")}))
     with open(os.path.join(DATA, "summary.json"), "w", encoding="utf-8") as fh:
