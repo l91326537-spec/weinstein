@@ -542,6 +542,53 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def climax_exit(frames, sig, thr, mode):
+    """30주선 대비 thr% 넘게 오르면(과열): mode 'half' = 그 주 종가에 절반 매도·나머지는 원래 규칙 /
+       'half10' = 절반 매도·나머지는 금요일 종가가 10주선 아래면 다음 주 시가 매도 / 'all10' = 전부 10주선 이탈 때 매도.
+       절반 매도는 두 청산가를 반씩 섞은 값으로 근사 (먼저 판 돈의 재투자는 반영 안 함)"""
+    s2 = sig.copy()
+    n_hit = 0
+    for i, r in s2.iterrows():
+        f = frames.get(r["ticker"])
+        if f is None or r["entry_date"] not in f.index:
+            continue
+        j0 = f.index.get_loc(r["entry_date"])
+        has_ex = pd.notna(r["exit_date"]) and r["exit_date"] in f.index
+        ex = f.index.get_loc(r["exit_date"]) if has_ex else len(f) - 1
+        c, o, ma, ma10 = f["close"].values, f["open"].values, f["ma30"].values, f["close"].rolling(10).mean().values
+        k = next((j for j in range(j0 + 1, ex) if not math.isnan(ma[j]) and c[j] / ma[j] - 1 >= thr / 100), None)
+        if k is None:
+            continue
+        n_hit += 1
+        p_half = c[k]
+        p_rest, d_rest = r["exit"], r["exit_date"]
+        if mode in ("half10", "all10"):
+            j = next((j for j in range(k + 1, ex) if not math.isnan(ma10[j]) and c[j] < ma10[j]), None)
+            if j is not None and j + 1 < len(f):
+                p_rest, d_rest = o[j + 1], f.index[j + 1]
+        px = p_rest if mode == "all10" else 0.5 * p_half + 0.5 * p_rest
+        s2.at[i, "exit"], s2.at[i, "exit_date"] = px, d_rest
+        s2.at[i, "R"] = (px - r["entry"]) / (r["entry"] - r["stop0"]) if r["entry"] > r["stop0"] else 0
+        s2.at[i, "ret"] = (px / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
+    return s2, n_hit
+
+
+def climax_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
+    sig0 = base_run[0]
+    rows = []
+    e_, t_ = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+    rows.append(curve_row("[과열] 지금 (그냥 보유)", f"거래 {len(t_)}건", e_["equity"]))
+    for thr in (50, 80, 100):
+        for mode, nm in (("half", "절반 매도 · 나머지 원래대로"), ("half10", "절반 매도 · 나머지 10주선 이탈 때 매도"), ("all10", "매도 없이 손절만 10주선으로")):
+            sg, nh = climax_exit(frames, sig0, thr, mode)
+            e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+            rows.append(curve_row(f"[과열] 30주선 +{thr}% 넘으면 {nm}", f"과열 도달 신호 {nh}건 · 거래 {len(t_)}건", e_["equity"]))
+    for r_ in rows:
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    return rows
+
+
 def addon_profit_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
     """추매(10주선·30주선)와 '조금 오르면 팔기'(익절)·갈아타기를 포트폴리오로 비교"""
     sig0 = base_run[0]
@@ -2255,6 +2302,10 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    try:
+        lev[0].extend(climax_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  과열 매도 비교 실패:", ex)
     try:
         lev[0].extend(addon_profit_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
