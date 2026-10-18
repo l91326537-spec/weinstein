@@ -542,6 +542,73 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def pit_size_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets):
+    """크기를 '지금 속한 지수'가 아니라 신호 그 주의 거래대금(10주 평균) 순위로 나눔: 상위 20% 대형 · 20~50% 중형 · 하위 50% 소형.
+       지금 대형인 종목 중 예전엔 작았다가 큰 종목(사후 선택)을 걸러 보기 위함. 반환: 곡선 표 행"""
+    sig0 = base_run[0]
+    us = [t for t in frames if capmap.get(t) in ("대형", "중형", "소형")]
+    DV = pd.concat({t: (frames[t]["close"] * frames[t]["vol"]).rolling(10).mean() for t in us}, axis=1).reindex(cal, method="ffill")
+    P = DV.rank(axis=1, pct=True)
+    lab = lambda p: np.where(p >= 0.8, "대형", np.where(p >= 0.5, "중형", np.where(np.isnan(p), "", "소형")))
+    pa = np.array([P[t].asof(d) if t in P else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    s_all = sig0.assign(pit=lab(pa), cur=sig0["ticker"].map(capmap).fillna(""))
+    d = s_all[~s_all["dup"]] if "dup" in s_all else s_all
+    d = d[d["pit"] != ""]
+    brk = d["kind"].isin(["B12", "B2"])
+    def line(nm, m):
+        m = m.fillna(False).astype(bool)
+        st = stats_trades(d[m])
+        buckets.append((f"[그때 크기] {nm}", st))
+        print(f"  [그때 크기] {nm}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    for cp in ("대형", "중형", "소형"):
+        line(f"지금 기준 {cp}", d["cur"] == cp)
+    for cp in ("대형", "중형", "소형"):
+        line(f"그때 거래대금 기준 {cp}", d["pit"] == cp)
+    for a in ("대형", "중형", "소형"):
+        for b in ("대형", "중형", "소형"):
+            line(f"지금 {a} · 그때 {b}", (d["cur"] == a) & (d["pit"] == b))
+    for cp in ("대형", "중형", "소형"):
+        line(f"그때 {cp} · 돌파", (d["pit"] == cp) & brk)
+        line(f"그때 {cp} · {ms0}점+", (d["pit"] == cp) & (d["score"] >= ms0))
+    rows = []
+    for nm, sg in (("지금", s_all), ("그때 소형인 신호 제외", s_all[s_all["pit"] != "소형"]), ("지금 소형인 신호 제외", s_all[s_all["cur"] != "소형"]),
+                   ("그때 대형인 신호만", s_all[s_all["pit"] == "대형"])):
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[그때 크기] 포트폴리오 · {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    # 소형주 돌파: +pct% 익절 vs 원래대로 보유
+    def wk(x):
+        return (pd.to_datetime(x["exit_date"]) - pd.to_datetime(x["entry_date"])).dt.days / 7
+    for nm, m in (("그때 소형 · 돌파", (d["pit"] == "소형") & brk), ("지금 소형 · 돌파", (d["cur"] == "소형") & brk),
+                  ("그때 소형 · 돌파 · RS 0+", (d["pit"] == "소형") & brk & (np.array([frames[t]["rs"].asof(x) for t, x in zip(d["ticker"], d["sig_date"])]) >= 0)),
+                  ("그때 대·중형 · 돌파 (비교)", (d["pit"] != "소형") & brk)):
+        base = d[m.fillna(False).astype(bool)]
+        if base.empty:
+            continue
+        for pct in (None, 20, 30, 50):
+            x = base if pct is None else take_profit(frames, base, pct)
+            st, w = stats_trades(x), wk(x)
+            per = x["ret"].sum() / max(w.sum(), 1)
+            how = "원래대로 보유" if pct is None else f"+{pct}% 익절"
+            buckets.append((f"[소형 익절] {nm} · {how}", st))
+            print(f"  [소형 익절] {nm} · {how}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 평균 수익 {f_(st.get('ret'))}% · "
+                  f"평균 보유 {w.mean():.0f}주 · 보유 1주당 {per:.2f}%")
+    # 소형 돌파만 담는 계좌 (남는 돈 현금): 보유 vs +30% 익절
+    sm = s_all[(s_all["pit"] == "소형") & s_all["kind"].isin(["B12", "B2"])]
+    for ms in (60, 70):
+        for pct in (None, 30):
+            sg = sm if pct is None else take_profit(frames, sm[sm["score"] >= ms], pct)
+            e_, t_ = run_portfolio(sg, frames, cal, ms, max_pos=6, fill=None, caps=capmap)
+            how = "보유" if pct is None else f"+{pct}% 익절"
+            rows.append(curve_row(f"[소형 익절] 소형 돌파만 {ms}점+ · {how} · 남는 돈 현금", f"거래 {len(t_)}건", e_["equity"]))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    return rows
+
+
 def a_grade_study(frames, cal, dfs, base_run, ms0, mp, fill, msmall, capmap):
     """A급 돌파(대·중형 · 기저 26주+ · 돌파 주 거래량 2배+ · RS 0+)만 사기, 종목 수 줄여 집중, 지수 코어와 섞기. 반환: 곡선 표 행
        돌파 주 거래량은 그 주가 끝나야 알 수 있음 → 실제로는 금요일 장 마감 전 확인 후 매수에 가까움"""
@@ -2404,6 +2471,10 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
+    try:
+        lev[0].extend(pit_size_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+    except Exception as ex:
+        print("  그때 크기 비교 실패:", ex)
     try:
         lev[0].extend(a_grade_study(frames, cal, dfs, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
