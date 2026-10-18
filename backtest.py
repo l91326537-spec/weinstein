@@ -542,6 +542,49 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def sector_rs_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, buckets):
+    """같은 업종(GICS 섹터) 안에서 RS 순위: 그 주 업종 내 RS 백분위, 같은 주 같은 업종 신호 중 RS 1등 여부"""
+    sig0 = base_run[0]
+    RS = pd.concat({t: f["rs"] for t, f in frames.items()}, axis=1).reindex(cal)
+    pct = pd.DataFrame(index=cal, columns=RS.columns, dtype=float)
+    by = {}
+    for t in RS.columns:
+        by.setdefault(secmap.get(t) or "기타", []).append(t)
+    for sec, cols in by.items():
+        if len(cols) >= 5:
+            pct[cols] = RS[cols].rank(axis=1, pct=True)
+    d = sig0[~sig0["dup"]].copy() if "dup" in sig0 else sig0.copy()
+    d = d[d["ticker"].map(capmap) != "소형"]
+    d["sec"] = d["ticker"].map(secmap).fillna("기타")
+    d["pct"] = [pct[t].asof(dd) if t in pct else np.nan for t, dd in zip(d["ticker"], d["sig_date"])]
+    d["rs_"] = [RS[t].asof(dd) if t in RS else np.nan for t, dd in zip(d["ticker"], d["sig_date"])]
+    d["rank_wk"] = d.groupby(["sec", "sig_date"])["rs_"].rank(ascending=False, method="first")
+    d["n_wk"] = d.groupby(["sec", "sig_date"])["rs_"].transform("count")
+    hi = d["score"] >= ms0
+    for lab, m in [("업종 내 RS 상위 10%", d["pct"] >= 0.9), ("업종 내 RS 상위 10~25%", (d["pct"] >= 0.75) & (d["pct"] < 0.9)),
+                   ("업종 내 RS 25~50%", (d["pct"] >= 0.5) & (d["pct"] < 0.75)), ("업종 내 RS 하위 50%", d["pct"] < 0.5),
+                   (f"{ms0}점+ · 업종 내 RS 상위 25%", hi & (d["pct"] >= 0.75)), (f"{ms0}점+ · 업종 내 RS 25~50%", hi & (d["pct"] >= 0.5) & (d["pct"] < 0.75)),
+                   (f"{ms0}점+ · 업종 내 RS 하위 50%", hi & (d["pct"] < 0.5)),
+                   ("같은 주 같은 업종 신호 2개+ 중 RS 1등", (d["n_wk"] >= 2) & (d["rank_wk"] == 1)),
+                   ("같은 주 같은 업종 신호 2개+ 중 2등 이하", (d["n_wk"] >= 2) & (d["rank_wk"] > 1))]:
+        st = stats_trades(d[m.fillna(False).astype(bool)])
+        buckets.append((f"[업종 RS 순위] {lab} (대·중형)", st))
+        print(f"  [업종 RS 순위] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    rows = []
+    s_all = sig0.copy()
+    pa = np.array([pct[t].asof(dd) if t in pct else np.nan for t, dd in zip(s_all["ticker"], s_all["sig_date"])], dtype=float)
+    for nm, fn in (("지금", None), ("업종 내 RS 상위 25%면 +5점", lambda sg: sg.assign(score=np.where(pa >= 0.75, sg["score"] + 5, sg["score"]))),
+                   ("업종 내 RS 하위 50%면 사지 않음", lambda sg: sg[~(pa < 0.5)]),
+                   ("같은 점수면 업종 내 RS 높은 순으로", lambda sg: sg.assign(rk=-np.nan_to_num(pa, nan=0.0)))):
+        sg = s_all if fn is None else fn(s_all)
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk" if "rk" in sg else None)
+        rows.append(curve_row(f"[업종 RS 순위] 포트폴리오 · {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    return rows
+
+
 def climax_exit(frames, sig, thr, mode):
     """30주선 대비 thr% 넘게 오르면(과열): mode 'half' = 그 주 종가에 절반 매도·나머지는 원래 규칙 /
        'half10' = 절반 매도·나머지는 금요일 종가가 10주선 아래면 다음 주 시가 매도 / 'all10' = 전부 10주선 이탈 때 매도.
@@ -2302,6 +2345,11 @@ def main(argv=None, fetch=None, universe=None):
     qqq_entry = qqq_entry_study(dfs, start)
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
+    _sec_bk = []
+    try:
+        lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
+    except Exception as ex:
+        print("  업종 RS 순위 비교 실패:", ex)
     try:
         lev[0].extend(climax_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
@@ -2361,6 +2409,7 @@ def main(argv=None, fetch=None, universe=None):
     clean = sig[~sig["dup"]]
     bins = [(50, 65, "50–64 관찰"), (65, 75, "65–74 조건부"), (75, 80, "75–79"), (80, 90, "80–89 적극"), (90, 101, "90+")]
     buckets = [(lab, stats_trades(clean[(clean["score"] >= a) & (clean["score"] < b)])) for a, b, lab in bins]
+    buckets.extend(_sec_bk)
     # 2단계 진행도·기저 길이별 (모든 신호, 지금 점수 50점+)
     allsig = sig_inc
     allsig = allsig[~allsig["dup"]].copy()
