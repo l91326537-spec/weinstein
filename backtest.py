@@ -542,6 +542,64 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def a_grade_study(frames, cal, dfs, base_run, ms0, mp, fill, msmall, capmap):
+    """A급 돌파(대·중형 · 기저 26주+ · 돌파 주 거래량 2배+ · RS 0+)만 사기, 종목 수 줄여 집중, 지수 코어와 섞기. 반환: 곡선 표 행
+       돌파 주 거래량은 그 주가 끝나야 알 수 있음 → 실제로는 금요일 장 마감 전 확인 후 매수에 가까움"""
+    sig0 = base_run[0].copy()
+    vr_at = lambda col, dcol: [frames[t][col].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0[dcol])]
+    evr = np.array(vr_at("vr", "entry_date"), dtype=float)
+    bl = np.array(vr_at("base_len", "sig_date"), dtype=float)
+    rs = np.array(vr_at("rs", "sig_date"), dtype=float)
+    brk = sig0["kind"].isin(["B12", "B2"]).values & (sig0["ticker"].map(capmap) != "소형").values
+    a_nov = brk & (bl >= 26) & (rs >= 0)
+    a_ = a_nov & (evr >= 2)
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    for lab, m in (("A급 (거래량 2배+)", a_), ("A급에서 거래량 조건 뺌", a_nov)):
+        st = stats_trades(sig0[m & nd])
+        print(f"  [A급 돌파] 신호 · {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    only = lambda m: sig0[m].assign(score=100.0)
+    first = lambda m: sig0.assign(score=np.where(m, 100.0, sig0["score"]))
+    grid = [("지금", sig0, mp, None, None),
+            ("A급만 · 최대 6종목", only(a_), mp, None, None),
+            ("A급만 · 최대 4종목 · 한 종목 25%", only(a_), 4, None, 25),
+            ("A급만 · 최대 3종목 · 한 종목 33% · 손절 위험 2%", only(a_), 3, 2.0, 34),
+            ("A급(거래량 조건 없음)만 · 최대 6종목", only(a_nov), mp, None, None),
+            ("A급(거래량 조건 없음)만 · 최대 4종목 · 한 종목 25%", only(a_nov), 4, None, 25),
+            ("A급 먼저 + 나머지 80점+ · 최대 6종목", first(a_), mp, None, None),
+            ("A급 먼저 + 나머지 80점+ · 최대 5종목 · 한 종목 20%", first(a_), 5, None, 20)]
+    rows, curves = [], {}
+    old_r, old_w = BT["risk_pct"], BT["max_weight"]
+    try:
+        for nm, sg, mp_, rk, mw in grid:
+            BT["risk_pct"], BT["max_weight"] = rk or old_r, mw or old_w
+            e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp_, fill=fill, max_small=msmall, caps=capmap)
+            curves[nm] = e_["equity"]
+            rows.append(curve_row(f"[A급 돌파] {nm}", f"개별주 평균 {e_['stk'].mean():.0f}% · 거래 {len(t_)}건", e_["equity"]))
+            r_ = rows[-1]
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    finally:
+        BT["risk_pct"], BT["max_weight"] = old_r, old_w
+    if "QQQ" in dfs:                                   # 지수 코어 + 위성(전략) 섞기, 4주마다 비중 맞춤
+        qw = dfs["QQQ"]["Close"].reindex(cal, method="ffill").bfill()
+        QQQ = qw / qw.iloc[0] * 100
+        fq = S.indicators(dfs["QQQ"])
+        qst = fq.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).reindex(cal, method="ffill")
+        cores = {"QQQ 보유": QQQ, "QQQ 4단계면 현금": timed(QQQ, qst)}
+        best = max((k for k in curves if k != "지금"), key=lambda k: stats_curve(curves[k]).get("cagr") or -99)
+        for cn, cs in cores.items():
+            rows.append(curve_row(f"[지수 비중] {cn} 100%", "", cs))
+            for sn in ("지금", best):
+                sat = curves[sn].reindex(cal, method="ffill").bfill()
+                for w in (0.8, 0.7, 0.6, 0.5):
+                    rows.append(curve_row(f"[지수 비중] {cn} {int(w * 100)} + {sn} {int(round((1 - w) * 100))}", "4주마다 비중 맞춤", mix([cs, sat], [w, 1 - w])))
+        for r_ in rows:
+            if r_["name"].startswith("[지수 비중]"):
+                print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                      f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}%")
+    return rows
+
+
 def sector_rs_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, buckets):
     """같은 업종(GICS 섹터) 안에서 RS 순위: 그 주 업종 내 RS 백분위, 같은 주 같은 업종 신호 중 RS 1등 여부"""
     sig0 = base_run[0]
@@ -2346,6 +2404,10 @@ def main(argv=None, fetch=None, universe=None):
     improve, imp_curves, beta_rows, lev = improve_study(frames, cal, dfs, args, runs[ib], CV, dict(SK[sk_i], **base_kw), mp_i, fill_i, ms_i, capmap, near_earn,
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
+    try:
+        lev[0].extend(a_grade_study(frames, cal, dfs, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+    except Exception as ex:
+        print("  A급 돌파 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
