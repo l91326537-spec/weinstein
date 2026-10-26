@@ -542,6 +542,52 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def gray_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=12):
+    """회색지대(60~79점) 매수: 점수대별 신호 성과, 회색지대가 된 이유별 성과, 매수 기준 점수별 포트폴리오(시작 주·순서 흔들어 n번)"""
+    sig0 = base_run[0]
+    d = sig0[~sig0["dup"]] if "dup" in sig0 else sig0
+    at = lambda col, dcol: np.array([frames[t][col].asof(x) if t in frames else np.nan for t, x in zip(d["ticker"], d[dcol])], dtype=float)
+    ext, rs, ss, vr = at("ext", "sig_date"), at("rs", "sig_date"), at("sec_stage", "sig_date"), at("vr", "entry_date")
+    stop_pct = ((d["entry"] - d["stop0"]) / d["entry"] * 100).values
+    sc = d["score"].values
+    def line(lab, m):
+        st = stats_trades(d[m])
+        buckets.append((f"[회색지대] {lab}", st))
+        print(f"  [회색지대] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    for lo, hi in ((80, 101), (75, 80), (70, 75), (60, 70), (50, 60)):
+        line(f"{lo}~{hi - 1 if hi < 101 else 100}점", (sc >= lo) & (sc < hi))
+    g = (sc >= 60) & (sc < 80)
+    for lab, m in (("과열 (30주선 +15% 넘음)", ext > 15), ("RS 0 미만", rs < 0), ("업종 2단계 아님", ss != 2),
+                   ("돌파 주 거래량 1.5배 미만", d["kind"].isin(["B12", "B2"]).values & (vr < 1.5)), ("손절폭 10% 넘음", stop_pct > 10)):
+        line(f"60~79점 · {lab}", g & m)
+        line(f"80점+ · {lab}", (sc >= 80) & m)
+    rows = []
+    rng = np.random.default_rng(11)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    for th in (80, 75, 70, 60):
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 360:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sig0[sig0["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e_, _ = run_portfolio(sg2, frames, cal2, th, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e_["equity"])
+            cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        if cg:
+            cg, md = np.array(cg, float), np.array(md, float)
+            print(f"  [회색지대 흔들기 {len(cg)}번] {th}점 이상 매수: 연평균 중앙값 {f_(np.nanmedian(cg))}% · 하위 10% {f_(np.nanpercentile(cg, 10))}% · "
+                  f"상위 10% {f_(np.nanpercentile(cg, 90))}% · 최대낙폭 중앙값 {f_(np.nanmedian(md))}% · 나쁜 쪽 10% {f_(np.nanpercentile(md, 10))}%")
+    for th in (80, 70, 60):                       # 개별주만 (남는 돈 현금)
+        e_, t_ = run_portfolio(sig0, frames, cal, th, max_pos=mp, fill=None, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[회색지대] 개별주만 {th}점 이상 · 남는 돈 현금", f"거래 {len(t_)}건", e_["equity"]))
+        r_ = rows[-1]
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {r_['desc']}")
+    return rows
+
+
 def swap_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
     """자리가 꽉 찼을 때 '확실히 좋은' 새 신호면 가장 약한 보유 종목을 팔고 갈아타기.
        확실히 좋은 = 1→2단계 돌파 · 대·중형 · 기저 26주+ · RS 0+ · (돌파 주 거래량 2배+) · (업종이 최근 13주 안에 1→2단계로 전환). 반환: 곡선 표 행"""
@@ -2561,21 +2607,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(swap_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+        lev[0].extend(gray_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
-        print("  A급 갈아타기 비교 실패:", ex)
-    try:
-        robust_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
-    except Exception as ex:
-        print("  흔들기 비교 실패:", ex)
-    try:
-        lev[0].extend(pit_size_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
-    except Exception as ex:
-        print("  그때 크기 비교 실패:", ex)
-    try:
-        lev[0].extend(a_grade_study(frames, cal, dfs, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
-    except Exception as ex:
-        print("  A급 돌파 비교 실패:", ex)
+        print("  회색지대 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:

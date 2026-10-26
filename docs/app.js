@@ -462,19 +462,33 @@ function buySheet(td, qty, viol, edit) {
   const defStop = td.signal === "돌파" ? (td.small && td.bkStop ? Math.min(td.bkStop, td.close - 2 * td.atr) : td.close * 0.95) : td.signal === "풀백" && td.pbStop ? td.pbStop : td.stop;
   const h = edit || { buyDate: today(), buyPrice: td.close, initStop: +(+defStop).toFixed(2), shares: qty || "" };
   openSheet(`<h2>${edit ? "보유 수정" : "매수 기록"} · <span class="mono">${esc(td.t)}</span></h2>
-    ${viol?.length && !edit ? `<div class="warn">규칙 점검: ${viol.map(esc).join(" · ")}<br>그래도 기록하면 일지에 '규칙 위반'으로 표시돼요.</div>` : ""}
+    ${viol?.length && !edit ? `<div class="warn">${td.score != null && td.score >= 60 && td.score < BUY_SCORE ? `<b>회색지대 (${Math.round(td.score)}점)</b> · ` : ""}규칙 점검: ${viol.map(esc).join(" · ")}<br>관심 종목에 두고 ${BUY_SCORE}점이 되면 사세요. 그래도 기록하면 일지에 '규칙 위반'으로 따로 집계돼요.</div>` : ""}
     <form class="form" id="bf">
       <div class="grid2"><label>매수일<input id="f_date" type="date" required value="${esc(h.buyDate)}"></label>
       <label>매수가<input id="f_price" type="number" step="any" inputmode="decimal" required value="${esc(h.buyPrice)}"></label></div>
       <div class="grid2"><label>초기 손절가<input id="f_stop" type="number" step="any" inputmode="decimal" required value="${esc(fmt(h.initStop).replace(/,/g, ""))}"></label>
       <label>수량<input id="f_sh" type="number" step="any" inputmode="decimal" required value="${esc(h.shares)}"></label></div>
       <label>메모<input id="f_note" type="text" maxlength="80" value="${esc(h.note || "")}" placeholder="예: 돌파 매수 절반"></label>
+      <div class="note" id="f_risk"></div>
+      ${viol?.length && !edit ? `<label class="note" style="display:flex;gap:8px;align-items:center"><input id="f_ack" type="checkbox"> 규칙 밖 매수인 걸 알고 기록해요</label>` : ""}
       <p class="note" id="f_err" style="color:var(--s4)"></p>
       <div class="btns"><button class="btn primary" type="submit">${edit ? "저장" : "보유에 추가"}</button><button class="btn" type="button" id="f_cancel">취소</button></div>
     </form>`, sh => {
     $("#f_cancel", sh).onclick = closeSheet;
+    const st = store.get().settings;
+    const riskInfo = () => {   // 손절까지 갔을 때 계좌 손실 (원·%)와 1% 규칙 수량
+      const price = +$("#f_price", sh).value, stop = +$("#f_stop", sh).value, n = +$("#f_sh", sh).value;
+      if (!(price > stop) || !(st.account > 0)) { $("#f_risk", sh).textContent = ""; return; }
+      const loss = toKRW((price - stop) * (n || 0), td.t), lp = loss / st.account * 100, q = orderQty(td.t, price, stop, st);
+      $("#f_risk", sh).innerHTML = `손절가까지 가면 <b class="${lp > st.riskPct ? "neg" : ""}">-${Math.round(loss).toLocaleString()}원 (계좌의 ${lp.toFixed(1)}%)</b>`
+        + `${lp > st.riskPct ? ` · <b class="neg">${st.riskPct}% 규칙 초과</b>` : ""}<br>${st.riskPct}% 규칙 수량: ${q ?? "–"}주`;
+    };
+    ["#f_price", "#f_stop", "#f_sh"].forEach(k => $(k, sh).oninput = riskInfo);
+    riskInfo();
     $("#bf", sh).onsubmit = e => {
       e.preventDefault();
+      const ack = $("#f_ack", sh);
+      if (ack && !ack.checked) { $("#f_err", sh).textContent = "규칙 밖 매수예요. 정말 기록하려면 체크하세요."; return; }
       const price = +$("#f_price", sh).value, stop = +$("#f_stop", sh).value, sh_ = +$("#f_sh", sh).value;
       if (!(stop < price)) { $("#f_err", sh).textContent = "손절가는 매수가보다 낮아야 해요."; return; }
       if (!(sh_ > 0)) { $("#f_err", sh).textContent = "수량을 입력하세요."; return; }
@@ -655,7 +669,10 @@ async function viewJournal(v) {
       <div class="kv"><div><span>내 거래 평균</span><b>${sgn(avg(rows.map(r => r.ret)))}</b></div><div><span>SPY 평균</span><b>${sgn(aS)}</b></div><div><span>QQQ 평균</span><b>${sgn(aQ)}</b></div></div>
       <p class="note">각 거래의 매수일~매도일 동안 SPY·QQQ 수익률을 주봉 종가로 근사해 평균했어요.</p></section>
     <section class="card"><h3>규칙을 지켰을 때 vs 어겼을 때</h3>
-      <div class="kv"><div><span>지킨 거래 ${good.length}건</span><b>${good.length ? avg(good.map(r => r.R ?? 0)).toFixed(2) + "R" : "–"}</b></div><div><span>어긴 거래 ${bad.length}건</span><b>${bad.length ? avg(bad.map(r => r.R ?? 0)).toFixed(2) + "R" : "–"}</b></div></div></section>
+      <div class="kv">${[["지킨 거래", good], ["어긴 거래", bad]].map(([lab, g]) => `<div><span>${lab} ${g.length}건 · 승률 ${g.length ? Math.round(g.filter(r => r.ret > 0).length / g.length * 100) : "–"}%</span><b>${g.length ? avg(g.map(r => r.R ?? 0)).toFixed(2) + "R · " : ""}<span class="${g.reduce((x, r) => x + r.pnl, 0) >= 0 ? "pos" : "neg"}">${Math.round(g.reduce((x, r) => x + r.pnl, 0)).toLocaleString()}원</span></b></div>`).join("")}</div>
+      ${(() => { const bk = [["80점+", r => r.scoreAtBuy >= 80], ["회색지대 60~79점", r => r.scoreAtBuy >= 60 && r.scoreAtBuy < 80], ["60점 미만", r => r.scoreAtBuy < 60]].map(([lab, f]) => [lab, rows.filter(r => r.scoreAtBuy != null && f(r))]).filter(([, g]) => g.length);
+        return bk.length ? `<div class="kv" style="margin-top:8px">${bk.map(([lab, g]) => `<div><span>${lab} ${g.length}건</span><b class="${g.reduce((x, r) => x + r.pnl, 0) >= 0 ? "pos" : "neg"}">${Math.round(g.reduce((x, r) => x + r.pnl, 0)).toLocaleString()}원</b></div>`).join("")}</div>` : ""; })()}
+      <p class="note">매수할 때 점수 기준. 점수 없이 직접 추가한 거래는 빠져요.</p></section>
     <div class="list">${rows.map(r => `<div class="item"><span class="mono" style="font-weight:800">${esc(r.t)}</span>
       <span style="min-width:0"><span class="muted" style="font-size:12px">${esc(r.buyDate)} → ${esc(r.sellDate)} · ${esc(r.reason)}</span>${r.bad ? ` <span class="tag">규칙 위반</span>` : ""}</span>
       <span class="r"><b>${sgn(r.ret)}</b><span class="muted" style="font-size:11px">${r.R == null ? "" : r.R.toFixed(2) + "R"}</span></span>
