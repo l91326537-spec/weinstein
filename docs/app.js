@@ -366,7 +366,8 @@ function bindSearch(v) {
   const q = $("#q", v), sg = $("#sugg", v);
   const run = () => {
     const s = q.value.trim().toUpperCase(); if (!s) { sg.innerHTML = ""; return; }
-    const hits = SUM.index.filter(x => x.t.toUpperCase().startsWith(s) || (x.n || "").toUpperCase().includes(s)).slice(0, 12);
+    const rank = x => { const t = x.t.toUpperCase(); return t === s ? 0 : t.startsWith(s) ? 1 : (x.n || "").toUpperCase().includes(s) ? 2 : 9; };   // 티커가 정확히 같은 종목을 맨 앞에 (예: NET이 'Internet' 이름들에 밀리지 않게)
+    const hits = SUM.index.map(x => [rank(x), x]).filter(([r]) => r < 9).sort((a, b) => a[0] - b[0]).slice(0, 12).map(([, x]) => x);
     sg.innerHTML = hits.map(x => `<a class="item" href="#stock/${encodeURIComponent(x.t)}">${pill(x.st)}<span style="min-width:0"><span class="t">${esc(x.t)}</span><div class="n">${capTag(x.cap, x.mc)}${esc(x.n)}</div></span><span class="r"><b>${fmt(x.c)}</b>${sgn(x.w1)}</span></a>`).join("") || `<p class="note">찾는 종목이 없습니다. 목록에 없는 종목은 저장소의 my_tickers.txt에 추가하세요.</p>`;
   };
   q.oninput = run;
