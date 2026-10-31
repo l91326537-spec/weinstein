@@ -542,6 +542,69 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def setup_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=12):
+    """정석 셋업 확인: 2단계 몇 번째 30주선 눌림인지(첫 눌림 vs 3번째+), 2단계 나이(30주선 상승 주수),
+       큰 하락(-40%+) 뒤 첫 2단계(회복 초기), 업종 1단계 vs 2단계. 점수 가감 시안을 흔들기 n번으로 비교"""
+    sig0 = base_run[0]
+    for t, f in frames.items():                      # 2단계(30주선 상승) 구간마다 30주선 터치 횟수 누적
+        if "pb_n" in f:
+            continue
+        up = f["ma_up_weeks"].fillna(0) > 0
+        touch = (f["low"] <= f["ma30"] * 1.03) & up
+        start = touch & ~touch.shift(1, fill_value=False)
+        f["pb_n"] = start.astype(int).groupby((~up).cumsum()).cumsum() - start.astype(int)   # 이번 터치 전까지 횟수
+        lo104 = f["low"].rolling(104, min_periods=52).min()
+        hi156 = f["high"].rolling(156, min_periods=52).max()
+        f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)
+    at = lambda col: np.array([frames[t][col].asof(x) if t in frames else np.nan for t, x in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    pbn, upw, rec, ss = at("pb_n"), at("ma_up_weeks"), at("recov"), at("sec_stage")
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    pb = (sig0["signal"] == "풀백").values
+    brk = sig0["kind"].isin(["B12", "B2"]).values
+    sc = sig0["score"].values
+    def line(lab, m):
+        st = stats_trades(sig0[m & nd])
+        buckets.append((f"[정석 셋업] {lab}", st))
+        print(f"  [정석 셋업] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    for lab, m in (("첫 30주선 눌림", pbn == 0), ("2번째 눌림", pbn == 1), ("3번째 눌림", pbn == 2), ("4번째+ 눌림", pbn >= 3)):
+        line(f"풀백 · {lab}", pb & m)
+        line(f"풀백 · {lab} · {ms0}점+", pb & m & (sc >= ms0))
+    for lo, hi in ((0, 13), (13, 26), (26, 52), (52, 78), (78, 999)):
+        line(f"2단계 나이 {lo}~{hi if hi < 999 else ''}주 · 전체", (upw >= lo) & (upw < hi))
+    line("큰 하락 뒤 회복 초기 · 돌파", brk & (rec == 1)); line("그 외 · 돌파", brk & (rec != 1))
+    line("큰 하락 뒤 회복 초기 · 풀백", pb & (rec == 1)); line("그 외 · 풀백", pb & (rec != 1))
+    line("큰 하락 뒤 회복 초기 · 첫·두번째 눌림", pb & (rec == 1) & (pbn <= 1))
+    for k in (1, 2, 3):
+        line(f"업종 {k}단계 · 전체", ss == k); line(f"업종 {k}단계 · {ms0}점+", (ss == k) & (sc >= ms0))
+    adj = {"지금": np.zeros(len(sig0)),
+           "첫 눌림 +10 · 4번째+ 눌림 -10": np.where(pb & (pbn == 0), 10, 0) + np.where(pb & (pbn >= 3), -10, 0),
+           "큰 하락 뒤 회복 초기(돌파·첫 두 눌림) +8": np.where((rec == 1) & (brk | (pb & (pbn <= 1))), 8, 0),
+           "업종 1단계도 2단계와 같은 점수(+4)": np.where(ss == 1, 4, 0),
+           "셋 모두": np.where(pb & (pbn == 0), 10, 0) + np.where(pb & (pbn >= 3), -10, 0)
+                     + np.where((rec == 1) & (brk | (pb & (pbn <= 1))), 8, 0) + np.where(ss == 1, 4, 0)}
+    rng = np.random.default_rng(13)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, a in adj.items():
+        sgA = sig0.assign(score=np.clip(sig0["score"].values + a, 0, 100))
+        e_, t_ = run_portfolio(sgA, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[정석 셋업] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 300:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sgA[sgA["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [정석 셋업] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def gray_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=12):
     """회색지대(60~79점) 매수: 점수대별 신호 성과, 회색지대가 된 이유별 성과, 매수 기준 점수별 포트폴리오(시작 주·순서 흔들어 n번)"""
     sig0 = base_run[0]
@@ -2607,9 +2670,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(gray_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+        lev[0].extend(setup_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
-        print("  회색지대 비교 실패:", ex)
+        print("  정석 셋업 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
