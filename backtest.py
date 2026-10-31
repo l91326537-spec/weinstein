@@ -542,6 +542,78 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def add_setup_cols(frames):
+    """pb_n = 2단계(30주선 상승) 구간 안에서 이번 터치 전까지 30주선(+3%) 터치 횟수, recov = 2년 안 -40%+ 하락 뒤 30주선 상승 52주 이내"""
+    for t, f in frames.items():
+        if "pb_n" in f:
+            continue
+        up = f["ma_up_weeks"].fillna(0) > 0
+        touch = (f["low"] <= f["ma30"] * 1.03) & up
+        start = touch & ~touch.shift(1, fill_value=False)
+        f["pb_n"] = start.astype(int).groupby((~up).cumsum()).cumsum() - start.astype(int)
+        lo104 = f["low"].rolling(104, min_periods=52).min()
+        hi156 = f["high"].rolling(156, min_periods=52).max()
+        f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)
+
+
+def gate_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=10):
+    """덧셈 점수(80점+) vs '관문 → 셋업 → 순위': 관문(종목 1·2단계, 시장 4단계 아님, RS 0+, 이격 20% 이하, 손절폭 12% 이하)을
+       모두 통과하고 셋업 A(26주+ 기저 돌파·거래량 2배) / B(2단계 첫·두번째 30주선 눌림) / C(큰 하락 뒤 회복 초기 돌파·첫 두 눌림) 중
+       하나면 매수, 같은 주엔 RS 높은 순. 흔들기 n번(시작 주·순서)"""
+    sig0 = base_run[0]
+    add_setup_cols(frames)
+    at = lambda col, dcol="sig_date": np.array([frames[t][col].asof(x) if t in frames and col in frames[t] else np.nan
+                                                 for t, x in zip(sig0["ticker"], sig0[dcol])], dtype=float)
+    st, mk, rs, ext, bl, pbn, rec = at("stage"), at("mkt"), at("rs"), at("ext"), at("base_len"), at("pb_n"), at("recov")
+    evr = at("vr", "entry_date")
+    stop_pct = ((sig0["entry"] - sig0["stop0"]) / sig0["entry"] * 100).values
+    brk, pb = sig0["kind"].isin(["B12", "B2"]).values, (sig0["signal"] == "풀백").values
+    gate = np.isin(st, [1, 2]) & (mk != 4) & (rs >= 0) & (ext <= 20) & (stop_pct <= 12)
+    A = brk & (bl >= 26) & (evr >= 2)
+    A15 = brk & (bl >= 26) & (evr >= 1.5)
+    B = pb & (pbn <= 1)
+    C = (rec == 1) & (brk | (pb & (pbn <= 1)))
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    for lab, m in (("관문 통과", gate), ("관문 · 셋업 A (기저 26주+ 돌파 · 거래량 2배)", gate & A), ("관문 · 셋업 B (첫·두번째 30주선 눌림)", gate & B),
+                   ("관문 · 셋업 C (큰 하락 뒤 회복 초기)", gate & C), ("관문 · 셋업 A·B·C 중 하나", gate & (A | B | C)),
+                   ("관문 · 셋업 없음", gate & ~(A | B | C)), ("관문 탈락", ~gate), (f"{ms0}점+", sig0["score"].values >= ms0),
+                   (f"{ms0}점+ · 관문 탈락", (sig0["score"].values >= ms0) & ~gate)):
+        s_ = stats_trades(sig0[m & nd])
+        buckets.append((f"[관문·셋업] {lab}", s_))
+        print(f"  [관문·셋업] {lab}: {s_.get('n', 0)}건 · 승률 {f_(s_.get('win'))}% · 평균 {f_(s_.get('avgR'))}R · 3R+ {f_(s_.get('big'))}% · 평균 수익 {f_(s_.get('ret'))}%")
+    rsr = -np.nan_to_num(rs, nan=0.0)
+    m5 = gate & ((A | B | C) | (sig0["score"].values >= ms0))
+    variants = [("지금: 덧셈 점수 80점+", sig0, ms0, False),
+                ("관문 + 셋업 A·B·C · RS 순", sig0[gate & (A | B | C)].assign(score=100.0, rk=rsr[gate & (A | B | C)]), 0, True),
+                ("관문 + 셋업 (A는 거래량 1.5배) · RS 순", sig0[gate & (A15 | B | C)].assign(score=100.0, rk=rsr[gate & (A15 | B | C)]), 0, True),
+                ("관문 + 80점+", sig0[gate], ms0, False),
+                ("관문 + (셋업 또는 80점+) · 셋업 먼저", sig0[m5].assign(score=np.where((A | B | C)[m5], 100.0, sig0["score"].values[m5])), ms0, False)]
+    rng = np.random.default_rng(19)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, sg, th, by_rs in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, th, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk" if by_rs else None)
+        rows.append(curve_row(f"[관문·셋업] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 300:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            if by_rs:   # RS 순서는 유지하고 아주 작게만 흔듦
+                sg2 = sg2.assign(rk=sg2["rk"] + r2.uniform(-0.5, 0.5, len(sg2)))
+            else:
+                sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, th, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [관문·셋업] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 · "
+              f"~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% | 흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% "
+              f"(하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def extended_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buckets, n=8):
     """이격(30주선 대비 %)이 클 때 사도 되나: 2단계·대·중형·RS 0+ 종목이 52주 신고가로 주봉 마감한 주(8주에 한 번)를 매수 후보로 두고
        이격 구간별 성과, '이격 상관없이 산다' vs '이격 30/20/15% 넘으면 안 산다' 포트폴리오(남는 돈 QQQ) 비교. 손절은 돌파와 같은 매수가 -5%"""
@@ -600,16 +672,7 @@ def setup_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n
     """정석 셋업 확인: 2단계 몇 번째 30주선 눌림인지(첫 눌림 vs 3번째+), 2단계 나이(30주선 상승 주수),
        큰 하락(-40%+) 뒤 첫 2단계(회복 초기), 업종 1단계 vs 2단계. 점수 가감 시안을 흔들기 n번으로 비교"""
     sig0 = base_run[0]
-    for t, f in frames.items():                      # 2단계(30주선 상승) 구간마다 30주선 터치 횟수 누적
-        if "pb_n" in f:
-            continue
-        up = f["ma_up_weeks"].fillna(0) > 0
-        touch = (f["low"] <= f["ma30"] * 1.03) & up
-        start = touch & ~touch.shift(1, fill_value=False)
-        f["pb_n"] = start.astype(int).groupby((~up).cumsum()).cumsum() - start.astype(int)   # 이번 터치 전까지 횟수
-        lo104 = f["low"].rolling(104, min_periods=52).min()
-        hi156 = f["high"].rolling(156, min_periods=52).max()
-        f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)
+    add_setup_cols(frames)
     at = lambda col: np.array([frames[t][col].asof(x) if t in frames else np.nan for t, x in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
     pbn, upw, rec, ss = at("pb_n"), at("ma_up_weeks"), at("recov"), at("sec_stage")
     nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
@@ -2724,9 +2787,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(extended_study(frames, cal, args.start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+        lev[0].extend(gate_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
-        print("  이격 비교 실패:", ex)
+        print("  관문·셋업 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
