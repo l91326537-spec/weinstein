@@ -105,6 +105,28 @@ def stock_payload(r):
     return d
 
 
+def index_exit(df):
+    """지수 30주선 반등 실패 매도 신호 (백테스트: QQQ 연 14.2→14.6%, 최대낙폭 -46→-30%, 연 1.1번 매매).
+       30주선이 평평·하락(10주 +0.8% 이하) 중 지난주 종가가 30주선 아래, 이번 주 고가가 30주선 99%+까지 왔다가 음봉으로 30주선 아래 마감.
+       신호(또는 4단계) 뒤 주봉 종가가 30주선 위로 돌아올 때까지 '매도 상태'"""
+    f = S.indicators(df)
+    stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+    c, o, h, ma, sl = f["close"], f["open"], f["high"], f["ma30"], f["slope"]
+    below = c < ma
+    fail = (sl <= S.CFG["flat_pct"]) & below.shift(1, fill_value=False) & (h >= ma * 0.99) & below & (c < o)
+    out, since = False, None
+    for d in f.index:
+        if stg[d] == 4 or fail[d]:
+            if not out:
+                since = d
+            out = True
+        elif not below[d]:
+            out, since = False, None
+    lf = fail[fail].index
+    return dict(out=bool(out), now=bool(fail.iloc[-1]), since=str(since.date()) if since is not None else None,
+                last=str(lf[-1].date()) if len(lf) else None, ma30=r2(ma.iloc[-1]), close=r2(c.iloc[-1]), slope=r2(sl.iloc[-1], 1))
+
+
 def market_breadth(dfs, uni, sectors, weeks=52):
     """와인스타인식 시장 폭 (참고용): 30주선 위 종목 비율, 52주 신고가-신저가, 업종 ETF 단계 분포"""
     C, M, NH, NL = {}, {}, {}, {}
@@ -211,6 +233,7 @@ def main(fetch=None, universe=None):
     summary = dict(fx=fx, updated=dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"), day=R["day"],
                    weekComplete=week_complete(), lastBar=str(dfs["^GSPC"].index[-1].date()) if "^GSPC" in dfs else None,
                    market=mk, worst=R["worst"], breadth=breadth, sectors=secs, candidates=cands,
+                   exitSig={t: index_exit(dfs[t]) for t in ("QQQ", "SPY") if t in dfs},
                    index=sorted(index, key=lambda x: x["t"]),
                    counts=dict(total=len(rows), universe=len(uni), **{c: sum(1 for r in rows if r.get("cap") == c) for c in ("대형", "중형", "소형")}))
     with open(os.path.join(DATA, "summary.json"), "w", encoding="utf-8") as fh:

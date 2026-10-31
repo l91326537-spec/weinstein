@@ -291,6 +291,14 @@ function breadthCard(b) {
     ${(b.warn || []).map(w => `<div class="warn">${esc(w)}</div>`).join("")}
     <p class="note">와인스타인이 시장을 볼 때 쓴 '시장 폭' 지표예요. 참고용이며 매매 규칙에는 쓰지 않아요. 백테스트에서 이 지표로 QQQ를 미리 사고팔면 지금 규칙(지수 4단계면 매도)보다 일관되게 낫지 않았어요. 여러 경고가 함께 뜨면 새 매수를 조심스럽게 보세요.</p></section>`;
 }
+/* 지수 30주선 반등 실패 매도 신호 (build_site.index_exit) */
+const exitOn = () => Object.values(SUM?.exitSig || {}).some(x => x && x.out);
+function exitWarn() {
+  const E = Object.entries(SUM?.exitSig || {}).filter(([, x]) => x && x.out);
+  if (!E.length) return "";
+  return `<div class="warn">${E.map(([t, x]) => `${esc(t)} 30주선 반등 실패 · 매도 신호${x.since ? ` (${esc(x.since)}부터)` : ""}`).join(" · ")}<br>
+    <span style="font-weight:500">30주선이 평평한데 아래에서 30주선까지 반등했다가 밀렸어요. QQQ(남는 돈)는 팔고, 주봉 종가가 30주선 위로 돌아오면 다시 사요. 백테스트(QQQ): 4단계까지 기다릴 때보다 최대낙폭 -46% → -30%.</span></div>`;
+}
 async function viewHome(v) {
   const mk = SUM.market, worst = SUM.worst;
   const mrow = Object.entries(mk).filter(([, m]) => m).map(([t, m]) => `<div class="row between"><span>${esc(m.name)}</span><span class="row">${pill(m.stage, m.label)}<span class="mono muted" style="font-size:12px">30주선 ${pct(m.ext)}</span></span></div>`).join("");
@@ -301,6 +309,7 @@ async function viewHome(v) {
   <a class="card item" href="#guide" style="text-decoration:none"><span class="pill st1">정리</span><span style="min-width:0"><b>원칙·백테스트 정리</b><div class="n">4단계, 매수·매도 원칙, 백테스트로 확인한 것</div></span><span class="r">›</span></a>
   <section class="card"><h3>시장</h3>${mrow}
     ${worst === 4 ? `<div class="warn">시장 4단계: 와인스테인 원칙상 신규 매수 보류</div>` : worst === 3 ? `<div class="warn">시장 3단계: 매수 규모 축소, 손절 좁히기</div>` : ""}
+    ${exitWarn()}
   </section>
   ${breadthCard(SUM.breadth)}
   <section class="card" id="alerts" hidden></section>
@@ -822,7 +831,7 @@ async function qqqPlan(s, keeps, buys) {
     const qd = await loadT("QQQ"), px = qd.w[qd.w.length - 1][W.c], pxK = toKRW(px, "QQQ");
     const held = +s.qqqShares || 0;
     const stk = keeps.reduce((a, k) => a + (k.close ? toKRW(k.close * +k.h.shares, k.h.t) : 0), 0) + buys.reduce((a, b) => a + b.amt, 0);
-    const cur = held * pxK, target = SUM.worst === 4 ? 0 : Math.max(0, (+s.account || 0) - stk);
+    const cur = held * pxK, target = SUM.worst === 4 || exitOn() ? 0 : Math.max(0, (+s.account || 0) - stk);
     const diff = target - cur;
     let sh = 0;
     if (target === 0 && held > 0) sh = -held;
@@ -882,7 +891,7 @@ async function viewOrders(v) {
   </section>
   ${O.q ? `<section class="card"><h3>QQQ (남는 돈) ${O.q.sh ? `<span class="pill ${O.q.sh > 0 ? "st2" : "st4"}">${O.q.sh > 0 ? "매수" : "매도"} ${Math.abs(O.q.sh)}주</span>` : `<span class="pill">그대로</span>`}</h3>
     <div class="n">보유 ${O.q.held}주 (약 ${Math.round(O.q.cur / 10000).toLocaleString()}만원) · 목표 약 ${Math.round(O.q.target / 10000).toLocaleString()}만원 · 현재가 ${fmt(O.q.px)}</div>
-    <p class="note">${SUM.worst === 4 ? "시장 4단계라 QQQ는 모두 팔아요." : `계좌에서 개별주(약 ${Math.round(O.q.stk / 10000).toLocaleString()}만원)를 뺀 나머지를 QQQ로 채워요. 목표와 차이가 계좌의 ${QQQ_BAND}%를 넘을 때만 사고팔아서 1년에 5번 정도만 손대면 돼요.`}
+    <p class="note">${SUM.worst === 4 ? "시장 4단계라 QQQ는 모두 팔아요." : exitOn() ? "지수 30주선 반등 실패 신호라 QQQ는 모두 팔아요. 주봉 종가가 30주선 위로 돌아오면 다시 채워요." : `계좌에서 개별주(약 ${Math.round(O.q.stk / 10000).toLocaleString()}만원)를 뺀 나머지를 QQQ로 채워요. 목표와 차이가 계좌의 ${QQQ_BAND}%를 넘을 때만 사고팔아서 1년에 5번 정도만 손대면 돼요.`}
     QQQ 보유 수량은 설정에서 입력해요. 개별주를 살 돈이 모자라면 QQQ를 팔아서 마련하세요.</p></section>` : ""}
   ${O.keeps.length ? `<section class="card"><h3>보유 유지 ${O.keeps.length}종목</h3><p class="note">증권사에 걸어 둔 손절 주문이 맞는지 확인하세요.</p>
     <div class="list">${O.keeps.map(k => `<a class="item" href="#stock/${encodeURIComponent(k.h.t)}"><span class="pill st2">유지</span><span style="min-width:0"><b class="mono">${esc(k.h.t)}</b> ${k.h.shares}주<div class="n">금요일 종가 ${fmt(k.stop)} 아래면 매도 · 비상 자동 매도 ${fmt(k.stop * 0.97)}</div></span><span class="r"><b>${fmt(k.close)}</b></span></a>`).join("")}</div></section>` : ""}
