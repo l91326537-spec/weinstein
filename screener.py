@@ -572,6 +572,11 @@ def indicators(df):
     up = (f["slope"] > CFG["flat_pct"]).astype(int)
     f["ma_up_weeks"] = up.groupby((up == 0).cumsum()).cumsum()
     f["ma_rise52"] = (ma / ma.rolling(52, min_periods=20).min() - 1) * 100
+    # 2단계(30주선 상승) 구간 안에서 이번(또는 다음) 30주선 눌림 전까지 몇 번 눌렸나: 0 = 첫 눌림
+    up_b = f["ma_up_weeks"] > 0
+    touch = (l <= ma * 1.03) & up_b
+    start = touch & ~touch.shift(1, fill_value=False)
+    f["pb_n"] = start.astype(int).groupby((~up_b).cumsum()).cumsum() - touch.astype(int)
     # 인수합병 의심: 최근 1년 안에 한 주 +12% 이상 급등 후, 8주 범위 7% 이내·변동폭이 평소의 45% 이하로 '고정'
     atrp = f["atr10"] / c
     prev = atrp.shift(40).rolling(52, min_periods=20).median()       # 급등 전(약 1년 전) 평소 변동폭
@@ -670,6 +675,31 @@ def patterns(h, l, c, k=3):
                 if any(cv[j] < neck for j in range(max(d + 1, i - 7), i + 1)):   # 최근 8주 안에 목선 아래로 이탈
                     hs[i] = 1
     return pd.Series(ihs, index=c.index), pd.Series(hs, index=c.index)
+
+
+def setup_tags(s):
+    """백테스트(2006~)로 성과가 갈린 셋업 표시: [이름, 1=좋음/-1=주의, 근거]"""
+    out, sig = [], s.get("signal")
+    pbn, upw, ext, st = s.get("pb_n"), s.get("ma_up_weeks"), s.get("ext"), s.get("stage")
+    ok = lambda v: v is not None and not pd.isna(v)
+    if sig == "돌파" and (s.get("base_len") or 0) >= 26 and (s.get("brk_vr") or 0) >= 2 and (s.get("rs") or -1) >= 0:
+        out.append(["A급 돌파", 1, "기저 26주+ · 돌파 주 거래량 2배+ · RS 0+ → 평균 3.5R, 승률 35%"])
+    if sig == "풀백" and ok(pbn):
+        if pbn == 0:
+            out.append(["첫 30주선 눌림", 1, "2단계 들어간 뒤 첫 눌림 → 평균 2.3R (80점+면 5.6R, 승률 40%)"])
+        elif pbn >= 3:
+            out.append([f"{int(pbn) + 1}번째 눌림", -1, "2단계에서 4번째 이상 눌림 → 평균 1.6R (첫 눌림 2.3R)"])
+    if st == 2 and ok(upw) and 0 < upw <= 26:
+        out.append(["2단계 초기", 1, f"30주선 {int(upw)}주째 상승 → 26주 이내 신호 평균 2.0~2.2R"])
+    elif st == 2 and ok(upw) and upw >= 78:
+        out.append(["2단계 후반", -1, f"30주선 {int(upw)}주째 상승 → 78주+ 신호 평균 1.4R"])
+    if s.get("sector_stage") == 1:
+        out.append(["업종 바닥권", 1, "업종 ETF 1단계 → 신호 평균 3.5R (930건 · 점수는 업종 점수 때문에 낮게 나옴)"])
+    if ok(ext) and ext >= 30:
+        out.append(["이격 30%+", -1, "30주선 +30% 넘게 위 → 신고가 매수 승률 12%, 평균 1.1R"])
+    elif ok(ext) and ext >= 15:
+        out.append(["이격 15%+", -1, "30주선 +15~30% 위 → 승률 15~18%, 평균 1.2~1.4R"])
+    return out
 
 
 def late_stage(r):
@@ -1257,6 +1287,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
                  buy_stop=round(s["res"] * 1.005, 2) if s["close"] <= s["res"]
                  else round(s["brk_level"] * 1.005, 2) if s["brk_level"] else None)
         s["signal"] = sig2
+        s["tags"] = setup_tags(s)
         rows.append(s)
     rows.sort(key=lambda r: -r["score"])
     return dict(day=day, mk=mk, sectors=sectors, rows=rows, dfs=dfs, uni=uni, bench=bench, worst=worst)

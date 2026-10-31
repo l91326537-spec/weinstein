@@ -545,12 +545,12 @@ def take_profit(frames, sig, pct):
 def add_setup_cols(frames):
     """pb_n = 2단계(30주선 상승) 구간 안에서 이번 터치 전까지 30주선(+3%) 터치 횟수, recov = 2년 안 -40%+ 하락 뒤 30주선 상승 52주 이내"""
     for t, f in frames.items():
-        if "pb_n" in f:
+        if "recov" in f:
             continue
         up = f["ma_up_weeks"].fillna(0) > 0
         touch = (f["low"] <= f["ma30"] * 1.03) & up
         start = touch & ~touch.shift(1, fill_value=False)
-        f["pb_n"] = start.astype(int).groupby((~up).cumsum()).cumsum() - start.astype(int)
+        f["pb_n"] = start.astype(int).groupby((~up).cumsum()).cumsum() - touch.astype(int)   # screener와 같은 정의
         lo104 = f["low"].rolling(104, min_periods=52).min()
         hi156 = f["high"].rolling(156, min_periods=52).max()
         f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)

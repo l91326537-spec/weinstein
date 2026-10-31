@@ -130,6 +130,8 @@ function lowWhy(td) {
   if (bd.rs != null && bd.rs <= 3) out.push(`RS ${bd.rs}: 시장보다 약함`);
   return out;
 }
+/* 백테스트로 성과가 갈린 셋업 표시 (screener.setup_tags): [이름, 1=좋음/-1=주의, 근거] */
+const tagPills = tags => (tags || []).map(([n, g, why]) => `<span class="pill ${g > 0 ? "st2" : "st4"}" title="${esc(why)}">${g > 0 ? "★ " : "⚠ "}${esc(n)}</span>`).join(" ");
 /* 매수 점수 기준: 백테스트(2006~)에서 80점 이상만 산 경우가 70점보다 앞·뒤 기간 모두 나았음 */
 const BUY_SCORE = 80;
 function ruleCheck(td) {
@@ -332,7 +334,7 @@ function planLines(c) {
 function candItem(c, rank) {
   return `<a class="item" href="#stock/${encodeURIComponent(c.t)}">
     <span class="row" style="gap:6px;flex-wrap:nowrap">${rank ? `<span class="rank">${rank}</span>` : ""}${ring(c.score, 42)}</span>
-    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}${c.mvOk ? ` <span class="pill st2" title="미너비니 트렌드 템플릿 충족">미너비니</span>` : ""}<div class="n">${capTag(c.cap, c.mc)}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
+    <span style="min-width:0"><span class="t">${esc(c.t)}</span> ${c.signal ? `<span class="pill st2">${esc(c.kind || c.signal)}</span>` : ""}${c.mvOk ? ` <span class="pill st2" title="미너비니 트렌드 템플릿 충족">미너비니</span>` : ""}${c.tags?.length ? " " + tagPills(c.tags) : ""}<div class="n">${capTag(c.cap, c.mc)}${esc(c.n)}${c.s ? " · " + esc(c.s) : ""}</div></span>
     <span class="r"><b>${fmt(c.close)}</b><span class="muted" style="font-size:11px">${pct(c.ext)} 이격</span></span>
     <span class="sub" style="display:grid;gap:2px">${planLines(c)}<span>거래량 <b>${c.volGrade}</b> · RS <b>${c.rsGrade}</b>등급${c.brkVr ? ` · 돌파 주 거래량 <b>${fmt(c.brkVr, 1)}배</b>` : ""}</span></span></a>`;
 }
@@ -402,7 +404,7 @@ async function viewStock(v, t) {
   <section class="card">
     <div class="row between" style="align-items:flex-start;flex-wrap:nowrap">
       <div style="min-width:0"><h1 class="mono">${esc(td.t)}</h1><div class="muted" style="font-size:13px">${esc(td.name)}${td.sector ? " · " + esc(td.sector) : ""}${td.mc ? " · 시총 " + mcTxt(td.mc) : ""}</div>
-        <div class="row" style="margin-top:6px">${pill(td.stage, td.label)}${td.signal ? `<span class="pill st2">${esc(td.kind || td.signal)}</span>` : ""}</div></div>
+        <div class="row" style="margin-top:6px">${pill(td.stage, td.label)}${td.signal ? `<span class="pill st2">${esc(td.kind || td.signal)}</span>` : ""}${tagPills(td.tags)}</div></div>
       ${td.score != null ? ring(td.score, 76) : ""}
     </div>
     <div class="row"><b class="mono" style="font-size:22px">${fmt(last[W.c])}</b>${sgn(prev ? (last[W.c] / prev[W.c] - 1) * 100 : null)}<span class="muted" style="font-size:12px">주간 · ${last[W.d]} 주</span></div>
@@ -434,6 +436,7 @@ async function viewStock(v, t) {
   <section class="card"><h3>점수 구성</h3>
     <div class="bars">${parts.map(([k, l, m]) => { const val = bd?.[k], wd = val == null ? 0 : Math.min(1, val / m) * 100, c = wd >= 75 ? "var(--s2)" : wd >= 50 ? "#5f8a2c" : wd >= 25 ? "var(--s3)" : "var(--s4)"; return `<div class="brow"><span>${l}</span><div class="track"><div class="fill" style="width:${wd}%;background:${c}"></div></div><span class="v"><b>${val ?? "–"}</b>/${m}</span></div>`; }).join("")}
     ${lowWhy(td).length ? `<p class="note">낮은 항목: ${lowWhy(td).map(esc).join(" · ")}</p>` : ""}
+    ${td.tags?.length ? `<p class="note">백테스트로 본 셋업 (점수와 별개 · 2006~ 신호 통계): ${td.tags.map(([n, g, why]) => `<b style="color:var(${g > 0 ? "--s2" : "--s4"})">${g > 0 ? "★" : "⚠"} ${esc(n)}</b> ${esc(why)}`).join(" · ")}</p>` : ""}
     ${grade9("거래량", td.volGrade)}${grade9("RS", td.rsGrade)}</div>
     ${td.caps?.length ? `<p class="note">가감점·상한: ${td.caps.map(esc).join(", ")}</p>` : ""}
     <p class="note">자동 계산 점수입니다. 사기 전에 프로젝트에 차트를 보내 최종 확인하세요.</p>
