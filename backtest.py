@@ -542,6 +542,60 @@ def take_profit(frames, sig, pct):
     return s2
 
 
+def extended_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buckets, n=8):
+    """이격(30주선 대비 %)이 클 때 사도 되나: 2단계·대·중형·RS 0+ 종목이 52주 신고가로 주봉 마감한 주(8주에 한 번)를 매수 후보로 두고
+       이격 구간별 성과, '이격 상관없이 산다' vs '이격 30/20/15% 넘으면 안 산다' 포트폴리오(남는 돈 QQQ) 비교. 손절은 돌파와 같은 매수가 -5%"""
+    rows_ = []
+    for t, f in frames.items():
+        if capmap.get(t) not in ("대형", "중형"):
+            continue
+        c, ext, rs, st, upw = f["close"].values, f["ext"].values, f["rs"].values, f["stage"].values, f["ma_up_weeks"].values
+        hi52 = f["close"].rolling(52, min_periods=40).max().values
+        last = -99
+        for i in np.where((f.index >= start) & (c >= hi52) & (st == 2) & (rs >= 0) & (upw > 0))[0]:
+            if i - last < 8:
+                continue
+            tr = simulate_trade(f, i, "돌파")
+            if tr is None:
+                continue
+            last = i
+            ent, ex, e, px, R, wk, why, s0 = tr
+            rows_.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0, R=R,
+                              ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, score=100.0, signal="돌파",
+                              stage_label="2단계", dup=False, kind="NH", ext=float(ext[i])))
+    d = pd.DataFrame(rows_)
+    if d.empty:
+        return []
+    for lo, hi in ((0, 10), (10, 15), (15, 20), (20, 30), (30, 50), (50, 999)):
+        m = (d["ext"] >= lo) & (d["ext"] < hi)
+        st = stats_trades(d[m])
+        buckets.append((f"[이격] 신고가 매수 · 30주선 +{lo}~{hi if hi < 999 else ''}%", st))
+        print(f"  [이격] 신고가 매수 · 30주선 +{lo}~{hi if hi < 999 else ''}%: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · "
+              f"평균 수익 {f_(st.get('ret'))}% · 3R+ {f_(st.get('big'))}% · 평균 보유 {f_(st.get('weeks'), 0)}주")
+    rng = np.random.default_rng(17)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, sg in (("신고가 · 이격 상관없이 삼", d), ("신고가 · 이격 30% 넘으면 안 삼", d[d["ext"] < 30]),
+                   ("신고가 · 이격 20% 넘으면 안 삼", d[d["ext"] < 20]), ("신고가 · 이격 15% 넘으면 안 삼", d[d["ext"] < 15]),
+                   ("지금 앱 (80점+, 이격 20%+ 감점)", base_run[0])):
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[이격] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 240:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0 if nm.startswith("지금") else 0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [이격] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def setup_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=12):
     """정석 셋업 확인: 2단계 몇 번째 30주선 눌림인지(첫 눌림 vs 3번째+), 2단계 나이(30주선 상승 주수),
        큰 하락(-40%+) 뒤 첫 2단계(회복 초기), 업종 1단계 vs 2단계. 점수 가감 시안을 흔들기 n번으로 비교"""
@@ -2670,9 +2724,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(setup_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+        lev[0].extend(extended_study(frames, cal, args.start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
-        print("  정석 셋업 비교 실패:", ex)
+        print("  이격 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
