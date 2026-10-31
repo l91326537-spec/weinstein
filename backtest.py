@@ -556,6 +556,63 @@ def add_setup_cols(frames):
         f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)
 
 
+def index_exit_study(dfs, cal, start):
+    """지수(QQQ·SPY) 매도 시점 비교: 그냥 보유 / 4단계면 현금(지금) / 30주선 아래 주봉 마감 즉시 매도 /
+       30주선 평평·하락 중 아래에서 반등해 30주선(99%+)에 닿고 실패(음봉·종가 30주선 아래)하면 매도 (+4단계) /
+       반등 실패에 절반·4단계에 전부. 재진입: 주봉 종가가 30주선 위이고 4단계 아님. 이번 주 종가로 정하고 다음 주 수익부터 반영(수수료 무시)"""
+    flat = S.CFG["flat_pct"]
+    rows = []
+    for tk in ("QQQ", "SPY"):
+        if tk not in dfs:
+            continue
+        f = S.indicators(dfs[tk])
+        stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+        f = f.reindex(cal, method="ffill"); stg = stg.reindex(cal, method="ffill")
+        o, h, c, ma, sl = f["open"].values, f["high"].values, f["close"].values, f["ma30"].values, f["slope"].values
+        st4 = (stg == 4).values
+        below = c < ma
+        fail = (sl <= flat) & np.r_[False, below[:-1]] & (h >= ma * 0.99) & below & (c < o)
+        ret = pd.Series(c, index=cal).pct_change().fillna(0).values
+        def run(rule):
+            pos, w, sw, eq = 1.0, [], 0, [1.0]
+            for k in range(1, len(cal)):
+                eq.append(eq[-1] * (1 + pos * ret[k]))
+                new = pos
+                if rule == "hold":
+                    new = 1.0
+                elif rule == "st4":
+                    new = 0.0 if st4[k] else 1.0
+                elif rule == "below":
+                    new = 0.0 if below[k] else 1.0
+                elif rule == "fail":
+                    if st4[k] or fail[k]:
+                        new = 0.0
+                    elif not below[k]:
+                        new = 1.0
+                elif rule == "half":
+                    if st4[k]:
+                        new = 0.0
+                    elif fail[k]:
+                        new = min(pos, 0.5)
+                    elif not below[k]:
+                        new = 1.0
+                if new != pos:
+                    sw += 1
+                pos = new
+            e = pd.Series(eq, index=cal) * 100
+            return e[e.index >= pd.Timestamp(start)], sw
+        for nm, rule in (("그냥 보유", "hold"), ("4단계면 현금 (지금)", "st4"), ("30주선 아래 마감 즉시 매도", "below"),
+                         ("30주선 반등 실패면 매도 (+4단계)", "fail"), ("반등 실패에 절반 · 4단계에 전부", "half")):
+            e, sw = run(rule)
+            yrs = max((e.index[-1] - e.index[0]).days / 365.25, 1)
+            r_ = curve_row(f"[지수 매도] {tk} · {nm}", f"매매 {sw}번 (연 {sw / yrs:.1f}번)", e)
+            rows.append(r_)
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · 최악의 해 {f_(r_['worst'])}% · {r_['desc']}")
+        print(f"  [지수 매도] {tk} 반등 실패 신호가 나온 주: " + ", ".join(str(d.date()) for d in cal[fail & (cal >= pd.Timestamp(start))][:40]))
+    return rows
+
+
 def gate_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, buckets, n=10):
     """덧셈 점수(80점+) vs '관문 → 셋업 → 순위': 관문(종목 1·2단계, 시장 4단계 아님, RS 0+, 이격 20% 이하, 손절폭 12% 이하)을
        모두 통과하고 셋업 A(26주+ 기저 돌파·거래량 2배) / B(2단계 첫·두번째 30주선 눌림) / C(큰 하락 뒤 회복 초기 돌파·첫 두 눌림) 중
@@ -2787,9 +2844,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(gate_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+        lev[0].extend(index_exit_study(dfs, cal, args.start))
     except Exception as ex:
-        print("  관문·셋업 비교 실패:", ex)
+        print("  지수 매도 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
