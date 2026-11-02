@@ -556,6 +556,45 @@ def add_setup_cols(frames):
         f["recov"] = ((lo104 <= hi156 * 0.6) & (f["ma_up_weeks"] <= 52) & up).astype(float)
 
 
+def pullback_depth_study(frames, base_run, capmap, buckets):
+    """돌파 뒤 되돌림은 어디까지 오나: 대·중형 돌파 신호(1→2·2단계 중간)의 매수 후 13주·26주 안에서 가장 깊이 내려간 곳으로 나눔
+       (서로 겹치지 않게 깊은 쪽부터): 30주선 아래 종가 / 30주선 터치(+2% 안, 종가는 지킴) / 돌파선 -3% 아래(30주선 위) / 돌파선 ±3% 되돌림 / 되돌림 없음(돌파선 +3% 위)"""
+    sig0 = base_run[0]
+    d = sig0[sig0["kind"].isin(["B12", "B2"]) & (sig0["ticker"].map(capmap) != "소형")]
+    d = d[~d["dup"]] if "dup" in d else d
+    for win in (13, 26):
+        lab_of = []
+        for r in d.itertuples():
+            f = frames.get(r.ticker)
+            if f is None or r.entry_date not in f.index:
+                lab_of.append(None); continue
+            j0 = f.index.get_loc(r.entry_date)
+            bl = f["brk_level"].asof(r.sig_date)
+            if not bl or pd.isna(bl):
+                lab_of.append(None); continue
+            w = f.iloc[j0:j0 + win]
+            lo, cl, ma = w["low"].values, w["close"].values, w["ma30"].values
+            if (cl < ma).any():
+                lab = "30주선 아래로 깨짐"
+            elif (lo <= ma * 1.02).any():
+                lab = "30주선 터치 (지킴)"
+            elif lo.min() < bl * 0.97:
+                lab = "돌파선 아래 (30주선 위)"
+            elif lo.min() <= bl * 1.03:
+                lab = "돌파선 되돌림 (±3%)"
+            else:
+                lab = "되돌림 없음 (돌파선 +3% 위)"
+            lab_of.append(lab)
+        lab_s = pd.Series(lab_of, index=d.index)
+        n_all = lab_s.notna().sum()
+        for lab in ("되돌림 없음 (돌파선 +3% 위)", "돌파선 되돌림 (±3%)", "돌파선 아래 (30주선 위)", "30주선 터치 (지킴)", "30주선 아래로 깨짐"):
+            m = lab_s == lab
+            st = stats_trades(d[m])
+            buckets.append((f"[되돌림 깊이 {win}주] {lab}", st))
+            print(f"  [되돌림 깊이 {win}주] {lab}: {m.sum()}건 ({m.sum() / max(n_all, 1) * 100:.0f}%) · 그 거래의 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    return []
+
+
 def index_exit_study(dfs, cal, start):
     """지수(QQQ·SPY) 매도 시점 비교: 그냥 보유 / 4단계면 현금(지금) / 30주선 아래 주봉 마감 즉시 매도 /
        30주선 평평·하락 중 아래에서 반등해 30주선(99%+)에 닿고 실패(음봉·종가 30주선 아래)하면 매도 (+4단계) /
@@ -2844,9 +2883,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(index_exit_study(dfs, cal, args.start))
+        pullback_depth_study(frames, runs[ib], capmap, _sec_bk)
     except Exception as ex:
-        print("  지수 매도 비교 실패:", ex)
+        print("  되돌림 깊이 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
