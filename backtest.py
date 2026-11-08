@@ -606,10 +606,12 @@ def index_exit_study(dfs, cal, start):
             continue
         f = S.indicators(dfs[tk])
         stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+        f["ma60"] = f["close"].rolling(60, min_periods=40).mean()
         f = f.reindex(cal, method="ffill"); stg = stg.reindex(cal, method="ffill")
         o, h, c, ma, sl = f["open"].values, f["high"].values, f["close"].values, f["ma30"].values, f["slope"].values
         st4 = (stg == 4).values
         below = c < ma
+        below60 = c < f["ma60"].values
         fail = (sl <= flat) & np.r_[False, below[:-1]] & (h >= ma * 0.99) & below & (c < o)
         ret = pd.Series(c, index=cal).pct_change().fillna(0).values
         def run(rule):
@@ -635,13 +637,25 @@ def index_exit_study(dfs, cal, start):
                         new = min(pos, 0.5)
                     elif not below[k]:
                         new = 1.0
+                elif rule in ("f60h", "f60a", "f60r"):   # 반등 실패·4단계는 전부, 60주선 아래 주봉 마감이면 절반(f60h·f60r) 또는 전부(f60a)
+                    if st4[k] or fail[k]:
+                        new = 0.0
+                    elif below60[k]:
+                        new = min(pos, 0.0 if rule == "f60a" else 0.5)
+                    elif pos == 0.5 and rule == "f60r":         # 60주선 위로 돌아오면 다시 전부
+                        new = 1.0
+                    elif not below[k]:                          # 그 외엔 30주선 위 마감에 다시 전부
+                        new = 1.0
                 if new != pos:
                     sw += 1
                 pos = new
             e = pd.Series(eq, index=cal) * 100
             return e[e.index >= pd.Timestamp(start)], sw
         for nm, rule in (("그냥 보유", "hold"), ("4단계면 현금 (지금)", "st4"), ("30주선 아래 마감 즉시 매도", "below"),
-                         ("30주선 반등 실패면 매도 (+4단계)", "fail"), ("반등 실패에 절반 · 4단계에 전부", "half")):
+                         ("30주선 반등 실패면 매도 (+4단계)", "fail"), ("반등 실패에 절반 · 4단계에 전부", "half"),
+                         ("반등 실패 + 60주선 아래 마감이면 절반 (30주선 회복에 복귀)", "f60h"),
+                         ("반등 실패 + 60주선 아래 마감이면 전부 (30주선 회복에 복귀)", "f60a"),
+                         ("반등 실패 + 60주선 아래 마감이면 절반 (60주선 회복에 복귀)", "f60r")):
             e, sw = run(rule)
             yrs = max((e.index[-1] - e.index[0]).days / 365.25, 1)
             r_ = curve_row(f"[지수 매도] {tk} · {nm}", f"매매 {sw}번 (연 {sw / yrs:.1f}번)", e)
@@ -2883,9 +2897,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        pullback_depth_study(frames, runs[ib], capmap, _sec_bk)
+        lev[0].extend(index_exit_study(dfs, cal, args.start))
     except Exception as ex:
-        print("  되돌림 깊이 비교 실패:", ex)
+        print("  지수 매도 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
