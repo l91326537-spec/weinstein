@@ -595,6 +595,47 @@ def pullback_depth_study(frames, base_run, capmap, buckets):
     return []
 
 
+def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, n=8):
+    """업종 분산 vs 강한 업종 집중: 지금(제한 없음) / 업종당 최대 1·2종목 / 그 주 업종 ETF RS 상위 2·3개 업종 종목만 / 상위 3개 + 업종당 최대 3.
+       흔들기 n번(시작 주·순서)으로 중앙값 비교"""
+    sig0 = base_run[0]
+    rep = {}
+    for t, f in frames.items():                     # 업종마다 대표 종목의 업종 ETF RS(sec_rs)
+        sc_ = secmap.get(t)
+        if sc_ and sc_ not in rep and "sec_rs" in f and f["sec_rs"].notna().sum() > 100:
+            rep[sc_] = f["sec_rs"]
+    R = pd.DataFrame(rep).reindex(cal, method="ffill")
+    rank = R.rank(axis=1, ascending=False)
+    rk = np.array([rank[secmap.get(t)].asof(d) if secmap.get(t) in rank else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    for lab, m in (("업종 RS 1~2위", rk <= 2), ("업종 RS 3~5위", (rk >= 3) & (rk <= 5)), ("업종 RS 6위 이하", rk >= 6)):
+        st = stats_trades(sig0[m & nd])
+        print(f"  [업종 집중] 신호 · {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}%")
+    variants = [("지금 (업종 제한 없음)", sig0, None), ("분산: 업종당 최대 2종목", sig0, 2), ("분산: 업종당 최대 1종목", sig0, 1),
+                ("집중: 업종 RS 상위 3개 업종만", sig0[rk <= 3], None), ("집중: 업종 RS 상위 2개 업종만", sig0[rk <= 2], None),
+                ("집중: 상위 3개 업종 + 업종당 최대 3종목", sig0[rk <= 3], 3)]
+    rng = np.random.default_rng(23)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, sg, msec in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, max_sector=msec, secmap=secmap)
+        rows.append(curve_row(f"[업종 집중] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 240:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk", max_sector=msec, secmap=secmap)
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [업종 집중] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 · 2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def index_exit_study(dfs, cal, start):
     """지수(QQQ·SPY) 매도 시점 비교: 그냥 보유 / 4단계면 현금(지금) / 30주선 아래 주봉 마감 즉시 매도 /
        30주선 평평·하락 중 아래에서 반등해 30주선(99%+)에 닿고 실패(음봉·종가 30주선 아래)하면 매도 (+4단계) /
@@ -1941,7 +1982,8 @@ def _victim(pos, frames, d, mode, new_score):
     return best
 
 
-def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None, pause=None):
+def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None, pause=None,
+                  max_sector=None, secmap=None):
     """pause: (n, k, mode) 손절(R<=0)이 n번 연속이면 mode='stop': k주 동안 신규 매수 쉼 / 'half': k주 동안 위험을 절반으로"""
     """order: 같은 주·같은 점수일 때 이 열이 작은 신호부터 (예: beta)
        추매 행(add=True): 같은 종목을 들고 있을 때만 사고, 종목 수에 세지 않음 · 수량은 위험 절반, 비중 상한 절반
@@ -1994,6 +2036,10 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 nbase = sum(1 for p in pos.values() if not p.get("add"))
                 if not is_add and max_small is not None and caps.get(r["ticker"]) == "소형" and sum(caps.get(x) == "소형" for x in pos) >= max_small:
                     continue
+                if not is_add and max_sector and secmap:          # 업종당 최대 종목 수
+                    sc_ = secmap.get(r["ticker"]) or "기타"
+                    if sum(1 for x, p_ in pos.items() if not p_.get("add") and (secmap.get(x) or "기타") == sc_) >= max_sector:
+                        continue
                 if not is_add and nbase >= mp:
                     if not rotate or r["score"] < rot_min or not (r["rot_ok"] == True if "rot_ok" in r.index else True):
                         continue
@@ -2906,9 +2952,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(index_exit_study(dfs, cal, args.start))
+        lev[0].extend(sector_conc_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}))
     except Exception as ex:
-        print("  지수 매도 비교 실패:", ex)
+        print("  업종 집중 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
