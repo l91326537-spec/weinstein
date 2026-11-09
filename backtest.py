@@ -595,6 +595,73 @@ def pullback_depth_study(frames, base_run, capmap, buckets):
     return []
 
 
+def ride_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buckets, n=8):
+    """'30주선 타고 오르기': 30주선 상승 30주 이내(2단계 초기) · 최근 13주 안 저가가 30주선 +3% 안까지 온 주 3번+ ·
+       그동안 주봉 종가는 30주선 아래로 안 감 · RS 0+ 이고 4주 전보다 높음. 이 패턴의 성과를 다른 신호와 비교하고 점수 가점·추가 매수 시안을 흔들기로 비교"""
+    for t, f in frames.items():
+        if "ride" in f:
+            continue
+        upw, lo, c, ma = f["ma_up_weeks"].fillna(0), f["low"], f["close"], f["ma30"]
+        near = ((lo <= ma * 1.03) & (c >= ma)).astype(int).rolling(13, min_periods=13).sum()
+        below = (c < ma).astype(int).rolling(13, min_periods=13).sum()
+        rs, rs4 = f["rs"], f["rs"].shift(4)
+        f["ride"] = ((upw >= 1) & (upw <= 30) & (near >= 3) & (below == 0) & (rs >= 0) & (rs > rs4)).astype(float)
+    sig0 = base_run[0]
+    rd = np.array([frames[t]["ride"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float) == 1
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    def line(lab, d):
+        st = stats_trades(d)
+        buckets.append((f"[30주선 타기] {lab}", st))
+        print(f"  [30주선 타기] {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    line("신호 · 30주선 타고 오르는 중", sig0[rd & nd]); line("신호 · 그 외", sig0[~rd & nd])
+    line(f"신호 · 30주선 타기 · {ms0}점+", sig0[rd & nd & (sig0['score'].values >= ms0)])
+    rows_ = []                                       # 패턴이 처음 나온 주(8주에 한 번) → 다음 주 시가 매수 (풀백식 손절)
+    for t, f in frames.items():
+        if capmap.get(t) not in ("대형", "중형"):
+            continue
+        idx = np.where((f["ride"].values == 1) & (f.index >= start))[0]
+        last = -99
+        for i in idx:
+            if i - last < 8:
+                continue
+            tr = simulate_trade(f, i, "풀백")
+            if tr is None:
+                continue
+            last = i
+            ent, ex, e, px, R, wk, why, s0 = tr
+            rows_.append(dict(ticker=t, sig_date=f.index[i], entry_date=ent, exit_date=ex, entry=e, exit=px, stop0=s0, R=R,
+                              ret=(px / e - 1) * 100 - 2 * BT["cost_pct"], weeks=wk, why=why, score=85.0, signal="풀백",
+                              stage_label="2단계", dup=False, kind="RIDE"))
+    ev = pd.DataFrame(rows_)
+    line("패턴 첫 주 매수 (대·중형)", ev)
+    for tk in ("MRNA", "ILMN", "ACHC", "EHC", "BTSG"):
+        if tk in frames:
+            f = frames[tk]; ds = f.index[(f["ride"] == 1) & (f.index >= "2025-01-01")]
+            print(f"  [30주선 타기] {tk} 패턴 나온 주: " + (", ".join(str(d.date()) for d in ds[:12]) or "없음"))
+    variants = [("지금", sig0), ("30주선 타기 신호 +10점", sig0.assign(score=np.clip(sig0["score"].values + np.where(rd, 10, 0), 0, 100))),
+                ("30주선 타기 패턴도 매수 (85점으로)", pd.concat([sig0, ev], ignore_index=True) if len(ev) else sig0)]
+    rng = np.random.default_rng(29)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, sg in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[30주선 타기] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 240:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [30주선 타기] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, n=8):
     """업종 분산 vs 강한 업종 집중: 지금(제한 없음) / 업종당 최대 1·2종목 / 그 주 업종 ETF RS 상위 2·3개 업종 종목만 / 상위 3개 + 업종당 최대 3.
        흔들기 n번(시작 주·순서)으로 중앙값 비교"""
@@ -2952,9 +3019,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(sector_conc_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}))
+        lev[0].extend(ride_study(frames, cal, args.start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
     except Exception as ex:
-        print("  업종 집중 비교 실패:", ex)
+        print("  30주선 타기 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
