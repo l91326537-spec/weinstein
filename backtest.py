@@ -637,6 +637,13 @@ def index_exit_study(dfs, cal, start):
                         new = min(pos, 0.5)
                     elif not below[k]:
                         new = 1.0
+                elif rule in ("b30h", "b30h60"):   # 30주선 아래 마감이면 절반, 반등 실패·4단계(b30h60은 60주선 아래 마감도)면 전부, 30주선 위 마감에 다시 전부
+                    if st4[k] or fail[k] or (rule == "b30h60" and below60[k]):
+                        new = 0.0
+                    elif below[k]:
+                        new = min(pos, 0.5)
+                    else:
+                        new = 1.0
                 elif rule in ("f60h", "f60a", "f60r"):   # 반등 실패·4단계는 전부, 60주선 아래 주봉 마감이면 절반(f60h·f60r) 또는 전부(f60a)
                     if st4[k] or fail[k]:
                         new = 0.0
@@ -655,7 +662,9 @@ def index_exit_study(dfs, cal, start):
                          ("30주선 반등 실패면 매도 (+4단계)", "fail"), ("반등 실패에 절반 · 4단계에 전부", "half"),
                          ("반등 실패 + 60주선 아래 마감이면 절반 (30주선 회복에 복귀)", "f60h"),
                          ("반등 실패 + 60주선 아래 마감이면 전부 (30주선 회복에 복귀)", "f60a"),
-                         ("반등 실패 + 60주선 아래 마감이면 절반 (60주선 회복에 복귀)", "f60r")):
+                         ("반등 실패 + 60주선 아래 마감이면 절반 (60주선 회복에 복귀)", "f60r"),
+                         ("30주선 아래 마감 절반 · 반등 실패·4단계에 전부", "b30h"),
+                         ("30주선 아래 마감 절반 · 반등 실패·4단계·60주선 아래에 전부", "b30h60")):
             e, sw = run(rule)
             yrs = max((e.index[-1] - e.index[0]).days / 365.25, 1)
             r_ = curve_row(f"[지수 매도] {tk} · {nm}", f"매매 {sw}번 (연 {sw / yrs:.1f}번)", e)
