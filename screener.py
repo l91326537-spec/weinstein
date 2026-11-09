@@ -469,6 +469,16 @@ def load_universe(quick=False):
                 uni[tk] = {"name": nm or tk, "sector": NASDAQ_SECTOR.get(r.nsector, r.nsector if r.nsector in SECTOR_ETF else None),
                            "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형", "src": "nasdaq"}
             print(f"  나스닥 시총 2조원+ 추가: {len(uni) - n0}종목")
+    # 업종이 빈 종목은 같은 회사의 다른 주식(예: BRK-A ← BRK-B) 업종을 빌려 씀
+    by_base = {}
+    for tk, info in uni.items():
+        if info.get("sector"):
+            by_base.setdefault(re.split(r"[-.]", tk)[0], info["sector"])
+    for tk, info in uni.items():
+        if not info.get("sector"):
+            sec = by_base.get(re.split(r"[-.]", tk)[0])
+            if sec:
+                info["sector"] = sec
     for tk, info in uni.items():
         mc, nm = ind.get(tk, (None, ""))
         info["mcap"], info["industry"] = mc, nm
@@ -1272,6 +1282,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
         score, bd, caps, stop2 = score_v2(s, m_stage, sec["stage"] if sec else None, sec["rs"] if sec else None, sig2)
         if sec is None and info["bench"] == "us":
             score = min(100, score + CFG["no_sector_pts"])
+            bd = dict(bd, sector=CFG["no_sector_pts"])       # 점수 구성에도 중립 점수로 보이게
             caps = caps + [f"업종 정보 없음 · 중립 {CFG['no_sector_pts']}점"]
         q = quality_adj(s, sig2)
         score = apply_quality(score, q, CFG["use_late"], CFG["use_base"])
