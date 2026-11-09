@@ -699,7 +699,18 @@ def setup_tags(s):
         out.append(["이격 30%+", -1, "30주선 +30% 넘게 위 → 신고가 매수 승률 12%, 평균 1.1R"])
     elif ok(ext) and ext >= 15:
         out.append(["이격 15%+", -1, "30주선 +15~30% 위 → 승률 15~18%, 평균 1.2~1.4R"])
-    return out
+    if s.get("hs_top"):
+        out.append(["헤드앤숄더 천장 뒤", -1, "최근 8주 안 헤드앤숄더 천장 완성 → 신호 평균 0.4R, 승률 18% (그 외 1.1R)"])
+    if sig == "돌파" and s.get("failed_brk"):
+        out.append(["돌파 실패 뒤 재돌파", -1, "최근 13주 안 돌파가 손절로 끝난 뒤 다시 돌파 → 평균 0.2R, 승률 11% (첫 돌파 1.8R)"])
+    mr = s.get("min_rel13")
+    if sig == "풀백" and ok(mr) and mr < 0.97:
+        out.append(["30주선 깼던 풀백", -1, "최근 13주 안 30주선 -3% 아래로 내려갔던 종목의 풀백 → 평균 1.3R (그 외 1.7R)"])
+    if s.get("dump13"):
+        out.append(["대량 급락 뒤", -1, "최근 13주 안 거래량 2배+ 동반 주간 -7% 급락 → 승률 20% (그 외 25%), 평균 R은 비슷"])
+    if s.get("cap") == "소형":
+        out.append(["소형주", -1, "소형주 신호 평균 0.2R (대형 2.0R) · 지금 기준 분류라 실제보다 차이가 과장됐을 수 있음"])
+    return sorted(out, key=lambda x: -x[1])
 
 
 def late_stage(r):
