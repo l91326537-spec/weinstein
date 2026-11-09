@@ -193,6 +193,8 @@ def themes_for(tk, industry=None, mcap=None):
     return out
 
 
+SECTOR_FIX2 = {"AAUC": "Materials", "ARIS": "Materials", "OGC": "Materials", "BGSI": "Consumer Discretionary",
+               "KSPI": "Financials", "OTF": "Financials", "BTX": "Financials", "QS": "Consumer Discretionary"}
 NASDAQ_SECTOR = {"Technology": "Information Technology", "Finance": "Financials", "Basic Materials": "Materials",
                  "Telecommunications": "Communication Services"}
 _NOT_COMMON = re.compile(r"preferred|depositary shares? represent|% |notes due|warrant|subordinated|debenture|\bunits?\b|\brights?\b|"
@@ -469,6 +471,20 @@ def load_universe(quick=False):
                 uni[tk] = {"name": nm or tk, "sector": NASDAQ_SECTOR.get(r.nsector, r.nsector if r.nsector in SECTOR_ETF else None),
                            "bench": "us", "cap": "대형" if r.mcap >= 1e10 else "중형", "src": "nasdaq"}
             print(f"  나스닥 시총 2조원+ 추가: {len(uni) - n0}종목")
+    # 내 종목(my_tickers)·나스닥100 등 업종·크기가 빈 미국 종목은 나스닥 스크리너 업종·시총으로 채움
+    if os.path.exists(ipath):
+        nsec = {str(r.ticker): (r.nsector if isinstance(r.nsector, str) else "", r.mcap) for r in idf.itertuples(index=False)} if "nsector" in idf.columns else {}
+        for tk, info in uni.items():
+            if info.get("bench") != "us" or tk not in nsec:
+                continue
+            ns, mc = nsec[tk]
+            if not info.get("sector") and ns:
+                info["sector"] = NASDAQ_SECTOR.get(ns, ns if ns in SECTOR_ETF else None)
+            if info.get("cap") == "기타" and mc and not pd.isna(mc) and mc > 0:
+                info["cap"] = "대형" if mc >= 1e10 else "중형" if mc >= THEME_MIN_MCAP else "소형"
+    for tk, sec in SECTOR_FIX2.items():          # 나스닥 데이터에도 업종이 빈 종목
+        if tk in uni and not uni[tk].get("sector"):
+            uni[tk]["sector"] = sec
     # 업종이 빈 종목은 같은 회사의 다른 주식(예: BRK-A ← BRK-B) 업종을 빌려 씀
     by_base = {}
     for tk, info in uni.items():
