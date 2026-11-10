@@ -1192,7 +1192,7 @@ def write_report(day, mk, sectors, rows, dfs):
 # ---------------- 이벤트성 거래량 (SEC 공시) ----------------
 # 인수합병·주식교환·공개매수 때 생기는 거래량은 차익거래·지수 조정 물량이라 '수요'가 아님
 EVENT_FORMS = {"425", "S-4", "SC TO-T", "SC TO-I", "SC 14D9", "SC 13E3", "DEFM14A", "PREM14A", "DEFM14C", "PREM14C"}
-SEC_UA = os.environ.get("SEC_UA") or "weinstein-screener/1.0 (github.com/l91326537-spec/weinstein)"
+SEC_UA = " ".join((os.environ.get("SEC_UA") or "").split()) or "weinstein-screener/1.0 (github.com/l91326537-spec/weinstein)"   # 붙여넣을 때 섞인 줄바꿈·공백 정리
 _SEC = {"cik": None, "ok": True, "cache": {}}
 
 

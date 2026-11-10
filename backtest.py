@@ -760,7 +760,7 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
        재무는 연말 결산 뒤 4개월 넘게 지난 5월에만 써서 미래 정보를 안 씀. 금융·보험·유틸리티·부동산은 뺌 (마법공식 관례).
        지금 종목 목록만 쓰므로 상장폐지 종목이 빠짐 → 결과가 실제보다 좋게 나올 수 있음"""
     import requests
-    ua = os.environ.get("SEC_UA")
+    ua = " ".join((os.environ.get("SEC_UA") or "").split())      # 붙여넣을 때 섞인 줄바꿈·공백 정리
     if not ua:
         print("  [가치] SEC_UA가 없어 건너뜀"); return []
     H = {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
