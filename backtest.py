@@ -754,6 +754,161 @@ def capitulation_study(frames, dfs, start, capmap):
     return []
 
 
+def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
+    """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
+       시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
+       재무는 연말 결산 뒤 4개월 넘게 지난 5월에만 써서 미래 정보를 안 씀. 금융·보험·유틸리티·부동산은 뺌 (마법공식 관례).
+       지금 종목 목록만 쓰므로 상장폐지 종목이 빠짐 → 결과가 실제보다 좋게 나올 수 있음"""
+    import requests
+    ua = os.environ.get("SEC_UA")
+    if not ua:
+        print("  [가치] SEC_UA가 없어 건너뜀"); return []
+    H = {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
+    def get(url):
+        for k in range(3):
+            try:
+                r = requests.get(url, headers=H, timeout=30); time.sleep(0.15)
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status(); return r.json()
+            except Exception as ex:
+                if k == 2:
+                    print(f"  [가치] 받기 실패 {url.rsplit('/', 3)[-3:]}: {ex}")
+                time.sleep(2)
+        return None
+    tk = get("https://www.sec.gov/files/company_tickers.json")
+    if not tk:
+        print("  [가치] SEC 종목 목록을 못 받음 → 건너뜀"); return []
+    cik2t = {}
+    for v in tk.values():
+        t = str(v["ticker"]).upper().replace(".", "-")
+        if t in frames:
+            cik2t.setdefault(int(v["cik_str"]), t)
+    print(f"  [가치] SEC 종목 연결 {len(cik2t)}개")
+    y_last = pd.Timestamp.today().year - 1
+    years = list(range(2009, y_last + 1))
+    C = {"oi": ("us-gaap", "OperatingIncomeLoss", "USD", ""), "ni": ("us-gaap", "NetIncomeLoss", "USD", ""),
+         "cfo": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities", "USD", ""),
+         "capex": ("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment", "USD", ""),
+         "assets": ("us-gaap", "Assets", "USD", "Q4I"), "float": ("dei", "EntityPublicFloat", "USD", "Q2I")}
+    F = {}
+    for key, (tax, con, unit, suf) in C.items():
+        cnt = []
+        for y in years:
+            d = get(f"https://data.sec.gov/api/xbrl/frames/{tax}/{con}/{unit}/CY{y}{suf}.json")
+            m = {}
+            for row in (d or {}).get("data", []):
+                t = cik2t.get(int(row["cik"]))
+                if t:
+                    m[t] = float(row["val"])
+            F[(key, y)] = m
+            cnt.append(len(m))
+        print(f"  [가치] {key}: 연도별 종목 수 {cnt}")
+    bad = ("financ", "utilit", "real estate", "bank", "insur", "금융", "유틸", "부동산", "은행", "보험", "증권")
+    elig = [t for t in frames if capmap.get(t) in ("대형", "중형") and not any(b in str((uni.get(t) or {}).get("sector") or "").lower() for b in bad)]
+    Cl = pd.concat({t: frames[t]["close"] for t in elig}, axis=1).reindex(cal, method="ffill", limit=2)
+    Op = pd.concat({t: frames[t]["open"] for t in elig}, axis=1).reindex(cal)
+    Stg = pd.concat({t: frames[t]["stage"] for t in elig}, axis=1).reindex(cal, method="ffill", limit=2)
+    def rank_year(Y, at):
+        """Y년 5월 리밸런스: Y-1년 재무 · at = 리밸런스 직전 주 (가격 기준)"""
+        fy = Y - 1
+        d0 = Cl.index[Cl.index.searchsorted(pd.Timestamp(f"{fy}-06-30")) - 1] if Cl.index[0] < pd.Timestamp(f"{fy}-06-30") else None
+        rows = []
+        for t in elig:
+            fl, oi, a = F.get(("float", fy), {}).get(t), F.get(("oi", fy), {}).get(t), F.get(("assets", fy), {}).get(t)
+            p_now = Cl.at[at, t] if at in Cl.index else np.nan
+            p0 = Cl.at[d0, t] if d0 is not None else np.nan
+            if not fl or fl < 5e8 or oi is None or not a or not (p_now > 0) or not (p0 > 0):
+                continue
+            mc = fl * p_now / p0
+            ni, cfo, cx = F.get(("ni", fy), {}).get(t), F.get(("cfo", fy), {}).get(t), F.get(("capex", fy), {}).get(t) or 0.0
+            rows.append(dict(t=t, mc=mc, ey=oi / mc, roa=oi / a, pe=(ni / mc) if ni is not None else np.nan,
+                             fcf=((cfo - cx) / mc) if cfo is not None else np.nan, stg=Stg.at[at, t] if at in Stg.index else np.nan))
+        d = pd.DataFrame(rows)
+        if d.empty:
+            return d
+        pos = d[d["ey"] > 0].copy()
+        pos["magic"] = pos["ey"].rank(ascending=False) + pos["roa"].rank(ascending=False)
+        return d.merge(pos[["t", "magic"]], on="t", how="left")
+    rebal = []
+    for Y in range(2010, y_last + 2):
+        k = Cl.index.searchsorted(pd.Timestamp(f"{Y}-05-01"))
+        if 1 <= k < len(Cl.index):
+            rebal.append((Y, k))
+    picks = {}
+    for Y, k in rebal:
+        d = rank_year(Y, Cl.index[k - 1])
+        if d.empty:
+            continue
+        mg = d.dropna(subset=["magic"]).sort_values("magic")
+        picks[Y] = {"모든 대·중형 (같은 비중)": list(d["t"]),
+                    "마법공식 상위 30": list(mg["t"][:n_hold]),
+                    "FCF 수익률 상위 30": list(d[d["fcf"] > 0].sort_values("fcf", ascending=False)["t"][:n_hold]),
+                    "이익수익률(낮은 PER) 상위 30": list(d[d["pe"] > 0].sort_values("pe", ascending=False)["t"][:n_hold]),
+                    "마법공식 상위 30 · 1·2단계만": list(mg[mg["stg"].isin([1, 2])]["t"][:n_hold]),
+                    "마법공식 상위 30 · 2단계만": list(mg[mg["stg"] == 2]["t"][:n_hold]),
+                    "마법공식 상위 30 · 4단계 되면 팔고 현금": list(mg["t"][:n_hold])}
+        print(f"  [가치] {Y}년 5월: 후보 {len(d)}개 · 마법공식 상위 5 {list(mg['t'][:5])}")
+    if not picks:
+        print("  [가치] 고를 종목이 없음 → 건너뜀"); return []
+    idx = Cl.index
+    starts = [k for Y, k in rebal if Y in picks]
+    plist = [(Y, k) for Y, k in rebal if Y in picks]
+    def run(name):
+        sell4 = name.endswith("현금")
+        eq, val = {}, 100.0
+        for n_, (Y, k) in enumerate(plist):
+            k2 = plist[n_ + 1][1] if n_ + 1 < len(plist) else len(idx) - 1
+            ts = [t for t in picks[Y][name] if Cl.iloc[k][t] > 0]
+            if not ts:
+                for jj in range(k, k2 + 1):
+                    eq[idx[jj]] = val
+                continue
+            sh = {t: val / len(ts) / Cl.iloc[k][t] for t in ts}
+            last = {t: Cl.iloc[k][t] for t in ts}
+            cash = 0.0
+            for jj in range(k, k2 + 1):
+                for t in list(sh):
+                    px = Cl.iloc[jj][t]
+                    if px > 0:
+                        last[t] = px
+                    if sell4 and jj > k and jj < k2 and Stg.iloc[jj][t] == 4:
+                        o_ = Op.iloc[jj + 1][t]
+                        cash += sh.pop(t) * (o_ if o_ > 0 else last[t])
+                eq[idx[jj]] = cash + sum(sh[t] * last[t] for t in sh)
+            val = eq[idx[k2]]
+        return pd.Series(eq).sort_index()
+    out = {}
+    for name in picks[next(iter(picks))]:
+        try:
+            out[name] = run(name)
+        except Exception as ex:
+            print(f"  [가치] {name} 계산 실패: {ex}")
+    e0 = idx[starts[0]]
+    for b in ("SPY", "QQQ"):
+        if b in dfs:
+            s_ = dfs[b]["Close"].reindex(idx, method="ffill")
+            out[f"{b} 그냥 보유"] = (s_ / s_.loc[e0] * 100)[idx >= e0]
+    spy = out.get("SPY 그냥 보유")
+    rows = []
+    for name, eq in out.items():
+        c = stats_curve(eq)
+        a, b = stats_curve(eq[eq.index < pd.Timestamp("2018-05-01")]), stats_curve(eq[eq.index >= pd.Timestamp("2018-05-01")])
+        win = ""
+        if spy is not None and not name.startswith("SPY"):
+            ks = [idx[k] for k in starts] + [idx[-1]]
+            r1 = [eq.asof(ks[i + 1]) / eq.asof(ks[i]) - spy.asof(ks[i + 1]) / spy.asof(ks[i]) for i in range(len(ks) - 1)]
+            win = f" · SPY보다 나은 해 {sum(x > 0 for x in r1)}/{len(r1)}"
+        print(f"  [가치] {name}: 연평균 {f_(c.get('cagr'))}% · 최대낙폭 {f_(c.get('mdd'))}% · 2010~2018 {f_(a.get('cagr'))}% · 2018~ {f_(b.get('cagr'))}%{win}")
+        rows.append(curve_row(f"[가치] {name}", "SEC 재무 · 매년 5월 교체", eq))
+    Y = max(picks)
+    d = rank_year(Y + 1 if Y + 1 <= y_last + 1 else Y, idx[-1])
+    if not d.empty:
+        mg = d.dropna(subset=["magic"]).sort_values("magic").head(20)
+        print("  [가치] 지금 마법공식 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · 이익수익률 {r.ey * 100:.0f}%)" for r in mg.itertuples()))
+    return rows
+
+
 def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
     """매수 점수 기준(70~85점)을 흔들기(시작 주 무작위 + 점수 ±3 흔들기)로 비교 · 80점과 비교해 나은 횟수도 셈"""
     sig0 = base_run[0]
@@ -3237,6 +3392,10 @@ def main(argv=None, fetch=None, universe=None):
         return dict(o=x["Open"], c=x["Close"], mkt=market, frac=frac, half3=half3, filt=filt, band=25)   # 앱과 같게: 차이 25% 넘을 때만 QQQ 맞춤
     q = F("QQQ")
     capmap = {t: v.get("cap") for t, v in uni.items()}
+    try:
+        value_study(frames, dfs, uni, capmap, cal)
+    except Exception as ex:
+        print("  [가치] 가치투자 비교 실패:", ex)
     try:
         crash_study(frames, start, capmap, fetch_earnings(sorted(t for t in frames if capmap.get(t) != "소형")))
     except Exception as ex:
