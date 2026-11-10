@@ -794,7 +794,8 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
          "rev": ("us-gaap", "Revenues", "USD", ""), "rev2": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax", "USD", ""),
          "inv": ("us-gaap", "InventoryNet", "USD", "Q4I"), "eq": ("us-gaap", "StockholdersEquity", "USD", "Q4I"),
          "ltd": ("us-gaap", "LongTermDebtNoncurrent", "USD", "Q4I"), "ltd2": ("us-gaap", "LongTermDebt", "USD", "Q4I"),
-         "div": ("us-gaap", "PaymentsOfDividends", "USD", ""), "div2": ("us-gaap", "PaymentsOfDividendsCommonStock", "USD", "")}
+         "div": ("us-gaap", "PaymentsOfDividends", "USD", ""), "div2": ("us-gaap", "PaymentsOfDividendsCommonStock", "USD", ""),
+         "ca": ("us-gaap", "AssetsCurrent", "USD", "Q4I"), "cl": ("us-gaap", "LiabilitiesCurrent", "USD", "Q4I")}
     F = {}
     for key, (tax, con, unit, suf) in C.items():
         cnt = []
@@ -839,7 +840,13 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
             rows.append(dict(t=t, mc=mc, ey=oi / mc, roa=oi / a, pe=(ni / mc) if ni is not None else np.nan,
                              fcf=((cfo - cx) / mc) if cfo is not None else np.nan, stg=Stg.at[at, t] if at in Stg.index else np.nan,
                              gr=gr, peg=(pe_ / (gr * 100)) if (pe_ > 0 and gr > 0) else np.nan,
-                             lyn=((gr + dv) * 100 / pe_) if (pe_ > 0 and gr == gr) else np.nan, de=de, inv_bad=inv_bad))
+                             lyn=((gr + dv) * 100 / pe_) if (pe_ > 0 and gr == gr) else np.nan, de=de, inv_bad=inv_bad,
+                             pb=(mc / eqv) if eqv and eqv > 0 else np.nan, pe2=pe_,
+                             cr=(g_("ca", fy) / g_("cl", fy)) if (g_("ca", fy) and g_("cl", fy)) else np.nan,
+                             nloss=sum(1 for y in range(fy - 4, fy + 1) if (g_("ni", y) is not None and g_("ni", y) <= 0)),
+                             nyrs=sum(1 for y in range(fy - 4, fy + 1) if g_("ni", y) is not None),
+                             roe_min=min([g_("ni", y) / g_("eq", y) for y in range(fy - 4, fy + 1) if g_("ni", y) is not None and g_("eq", y)] or [np.nan]),
+                             roe_n=sum(1 for y in range(fy - 4, fy + 1) if g_("ni", y) is not None and g_("eq", y) and g_("eq", y) > 0)))
         d = pd.DataFrame(rows)
         if d.empty:
             return d
@@ -870,7 +877,16 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
                          "[린치] 종합 (성장 15~50% · PEG≤1 · 부채 적음 · 재고 정상)": list(ly["t"][:n_hold]),
                          "[린치] 종합 · 2단계만": list(ly[ly["stg"] == 2]["t"][:n_hold]),
                          "[린치] 린치 비율 2 이상": list(d[d["lyn"] >= 2].sort_values("lyn", ascending=False)["t"][:n_hold])})
-        print(f"  [가치] {Y}년 린치 종합 {len(ly)}개 · PEG 후보 {len(pg)}개")
+        gd = d[(d["pe2"] > 0) & (d["pe2"] <= 15) & (d["pb"] > 0) & (d["pe2"] * d["pb"] <= 22.5) & ~(d["cr"] < 2) & d["cr"].notna()
+               & (d["nloss"] == 0) & (d["nyrs"] >= 3)].assign(gx=lambda x: x["pe2"] * x["pb"]).sort_values("gx")
+        gn = d[(d["pe2"] > 0) & (d["pb"] > 0) & (d["pe2"] * d["pb"] <= 22.5)].assign(gx=lambda x: x["pe2"] * x["pb"]).sort_values("gx")
+        bq = d[(d["roe_min"] >= 0.15) & (d["roe_n"] >= 3) & (d["nloss"] == 0) & ~(d["de"] > 0.5) & (d["fcf"] > 0)]
+        picks[Y].update({"[그레이엄] 방어적 투자자 (PER≤15·PER×PBR≤22.5·유동비율≥2·적자 없음)": list(gd["t"][:n_hold]),
+                         "[그레이엄] 그레이엄 수보다 싼 30 (PER×PBR 낮은 순)": list(gn["t"][:n_hold]),
+                         "[버핏] 우량 (ROE 15%+ 꾸준·부채 적음·적자 없음) · FCF 수익률 높은 30": list(bq.sort_values("fcf", ascending=False)["t"][:n_hold]),
+                         "[버핏] 우량 · FCF 수익률 4%+만": list(bq[bq["fcf"] >= 0.04].sort_values("fcf", ascending=False)["t"][:n_hold]),
+                         "[버핏] 우량 · FCF 높은 30 · 2단계만": list(bq[bq["stg"] == 2].sort_values("fcf", ascending=False)["t"][:n_hold])})
+        print(f"  [가치] {Y}년 린치 종합 {len(ly)}개 · PEG 후보 {len(pg)}개 · 그레이엄 방어적 {len(gd)}개 · 버핏 우량 {len(bq)}개")
         print(f"  [가치] {Y}년 5월: 후보 {len(d)}개 · 마법공식 상위 5 {list(mg['t'][:5])}")
     if not picks:
         print("  [가치] 고를 종목이 없음 → 건너뜀"); return []
@@ -934,8 +950,70 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
         mg = d.dropna(subset=["magic"]).sort_values("magic").head(20)
         ly = d[(d["gr"] >= 0.15) & (d["gr"] <= 0.5) & (d["peg"] <= 1) & ~d["inv_bad"] & ~(d["de"] > 0.5)].sort_values("peg").head(20)
         print("  [가치] 지금 린치 종합 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · PEG {r.peg:.2f} · 성장 {r.gr * 100:.0f}%)" for r in ly.itertuples()))
+        bq = d[(d["roe_min"] >= 0.15) & (d["roe_n"] >= 3) & (d["nloss"] == 0) & ~(d["de"] > 0.5) & (d["fcf"] > 0)].sort_values("fcf", ascending=False).head(20)
+        print("  [가치] 지금 버핏 우량 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · FCF {r.fcf * 100:.1f}% · 최저 ROE {r.roe_min * 100:.0f}%)" for r in bq.itertuples()))
+        gd = d[(d["pe2"] > 0) & (d["pe2"] <= 15) & (d["pb"] > 0) & (d["pe2"] * d["pb"] <= 22.5) & ~(d["cr"] < 2) & d["cr"].notna() & (d["nloss"] == 0)].sort_values("pe2").head(20)
+        print("  [가치] 지금 그레이엄 방어적 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · PER {r.pe2:.1f} · PBR {r.pb:.1f})" for r in gd.itertuples()))
         print("  [가치] 지금 마법공식 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · 이익수익률 {r.ey * 100:.0f}%)" for r in mg.itertuples()))
     return rows
+
+
+def _french_table(text):
+    """케네스 프렌치 CSV의 첫 표(월별 · 가치가중)를 DataFrame으로 (% 수익률 → 소수)"""
+    import re
+    lines = text.splitlines()
+    i = next(k for k, l in enumerate(lines) if re.match(r"^\s*\d{6}\s*,", l))
+    head = [h.strip() for h in lines[i - 1].split(",")]
+    rows = []
+    for l in lines[i:]:
+        if not re.match(r"^\s*\d{6}\s*,", l):
+            break
+        rows.append([x.strip() for x in l.split(",")])
+    df = pd.DataFrame([r[1:] for r in rows], columns=head[1:len(rows[0])], index=pd.to_datetime([r[0] for r in rows], format="%Y%m"))
+    return df.apply(pd.to_numeric, errors="coerce").replace([-99.99, -999], np.nan) / 100
+
+
+def french_study():
+    """케네스 프렌치 데이터 라이브러리(1926년~, 상장폐지 종목 포함 · 생존 편향 없음)로 가치·수익성(우량)·모멘텀(추세)·크기 효과를 100년 동안 확인"""
+    import io, zipfile, requests
+    base = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+    def get(name):
+        r = requests.get(base + name, timeout=60, headers={"User-Agent": "Mozilla/5.0 (research backtest)"})
+        r.raise_for_status()
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        return _french_table(z.read(z.namelist()[0]).decode("latin-1"))
+    ff = get("F-F_Research_Data_Factors_CSV.zip")
+    mkt = (ff["Mkt-RF"] + ff["RF"]).rename("시장 전체")
+    sets = {"가치(장부가/시가)": ("Portfolios_Formed_on_BE-ME_CSV.zip", "Hi 10", "Lo 10", "싼 10%", "비싼 10%"),
+            "수익성(영업이익/자본 · 버핏식 우량)": ("Portfolios_Formed_on_OP_CSV.zip", "Hi 10", "Lo 10", "수익성 높은 10%", "낮은 10%"),
+            "모멘텀(지난 12개월 · 추세)": ("10_Portfolios_Prior_12_2_CSV.zip", "Hi PRIOR", "Lo PRIOR", "많이 오른 10%", "많이 내린 10%"),
+            "크기(시가총액)": ("Portfolios_Formed_on_ME_CSV.zip", "Lo 10", "Hi 10", "가장 작은 10%", "가장 큰 10%")}
+    S_ = {}
+    for nm, (fn_, a, b, la, lb) in sets.items():
+        try:
+            t = get(fn_)
+            S_[f"{nm} · {la}"], S_[f"{nm} · {lb}"] = t[a], t[b]
+        except Exception as ex:
+            print(f"  [100년] {nm} 받기 실패: {ex}")
+    hv, hm = S_.get("가치(장부가/시가) · 싼 10%"), S_.get("모멘텀(지난 12개월 · 추세) · 많이 오른 10%")
+    if hv is not None and hm is not None:
+        S_["가치 싼 10% + 모멘텀 오른 10% 반반 (매달 맞춤)"] = pd.concat([hv, hm], axis=1).dropna().mean(axis=1)
+    S_["시장 전체"] = mkt
+    eras = [("1927~1962", "1927-01", "1962-12"), ("1963~1999", "1963-01", "1999-12"), ("2000~2009", "2000-01", "2009-12"), ("2010~", "2010-01", "2100-12")]
+    def st(r):
+        r = r.dropna()
+        if len(r) < 24:
+            return None, None
+        eq = (1 + r).cumprod()
+        return ((eq.iloc[-1]) ** (12 / len(r)) - 1) * 100, (eq / eq.cummax() - 1).min() * 100
+    for nm, r in S_.items():
+        c, m = st(r)
+        parts = []
+        for en, a, b in eras:
+            ce, _ = st(r[(r.index >= a) & (r.index <= b)])
+            parts.append(f"{en} {f_(ce)}%")
+        print(f"  [100년] {nm} ({r.dropna().index[0].year}~): 연평균 {f_(c)}% · 최대낙폭 {f_(m)}% · " + " · ".join(parts))
+    return []
 
 
 def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
@@ -3425,6 +3503,10 @@ def main(argv=None, fetch=None, universe=None):
         value_study(frames, dfs, uni, capmap, cal)
     except Exception as ex:
         print("  [가치] 가치투자 비교 실패:", ex)
+    try:
+        french_study()
+    except Exception as ex:
+        print("  [100년] 프렌치 데이터 비교 실패:", ex)
     try:
         crash_study(frames, start, capmap, fetch_earnings(sorted(t for t in frames if capmap.get(t) != "소형")))
     except Exception as ex:
