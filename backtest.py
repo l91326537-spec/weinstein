@@ -662,6 +662,35 @@ def ride_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buck
     return rows
 
 
+def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
+    """매수 점수 기준(70~85점)을 흔들기(시작 주 무작위 + 점수 ±3 흔들기)로 비교 · 80점과 비교해 나은 횟수도 셈"""
+    sig0 = base_run[0]
+    rng = np.random.default_rng(41)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows, res = [], {}
+    for ms in levels:
+        e_, t_ = run_portfolio(sig0, frames, cal, ms, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[점수 기준] {ms}점 이상 매수", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 200:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sig0[sig0["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        res[ms] = (cg, md)
+    base = res.get(80, ([], []))[0]
+    for (ms, (cg, md)), r_ in zip(res.items(), rows):
+        win = sum(1 for a, b in zip(cg, base) if a > b) if ms != 80 else None
+        print(f"  [점수 기준] {ms}점 이상: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · {r_['desc']} | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · "
+              f"낙폭 중앙값 {f_(np.nanmedian(md))}% (가장 깊은 {f_(np.nanmin(md))}%)" + (f" · 80점보다 나은 횟수 {win}/{min(len(cg), len(base))}" if win is not None else ""))
+    return rows
+
+
 def chop_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8):
     """'30주선 왕복': 신호 전 2년(104주) 동안 주봉 종가가 30주선 위아래로 오간 횟수. 자주 오간 종목의 돌파·풀백 성과가 나쁜지 보고
        감점·제외 시안을 흔들기로 비교"""
@@ -3199,9 +3228,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(chop_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
+        lev[0].extend(threshold_study(frames, cal, runs[ib], mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
-        print("  30주선 왕복 비교 실패:", ex)
+        print("  점수 기준 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
