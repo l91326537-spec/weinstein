@@ -662,6 +662,64 @@ def ride_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buck
     return rows
 
 
+def capitulation_study(frames, dfs, start, capmap):
+    """'공포 속 매수' 확인: ① 개별주가 30주선보다 크게 아래일 때 ② 바닥권 대량 거래 하락(투매 클라이맥스) ③ QQQ가 30주선보다 크게 아래일 때.
+       신호 주 다음 주 시가에 사서 4·13·26주 뒤 종가 수익률·승률과 13주 안 최대 추가 하락을 '아무 주에나 산 경우'와 비교. 같은 종목은 13주에 한 번만"""
+    H = (4, 13, 26)
+    ev = {}
+    def add(key, f, idx):
+        o, c, lo = f["open"].values, f["close"].values, f["low"].values
+        last = -99
+        for i in idx:
+            if i - last < 13 or i + 1 + max(H) >= len(f):
+                continue
+            last = i
+            e = o[i + 1]
+            if not e > 0:
+                continue
+            row = {h: c[i + h] / e - 1 for h in H}
+            row["dd"] = lo[i + 1:i + 14].min() / e - 1
+            ev.setdefault(key, []).append(row)
+    for t, f in frames.items():
+        cp = "대·중형" if capmap.get(t) in ("대형", "중형") else "소형"
+        if len(f) < 60:
+            continue
+        ok = (f.index >= start)
+        ext = (f["close"] / f["ma30"] - 1).values * 100
+        vr = (f["vol"] / f["vol"].rolling(10).mean().shift(1)).values
+        down = (f["close"] < f["close"].shift(1)).values
+        mk = f["mkt"].values
+        base = np.where(ok & ~np.isnan(ext))[0][::13]
+        add(f"아무 주에나 삼 ({cp})", f, base)
+        for th in (25, 35):
+            add(f"30주선 -{th}% 아래 ({cp})", f, np.where(ok & (ext <= -th))[0])
+        for vm in (2, 3):
+            m = ok & (vr >= vm) & down & (ext <= -20)
+            add(f"투매: 거래량 {vm}배+ 하락 · 30주선 -20% 아래 ({cp})", f, np.where(m)[0])
+            if vm == 2:
+                add(f"투매 2배+ · 시장 3·4단계 ({cp})", f, np.where(m & np.isin(mk, [3, 4]))[0])
+                add(f"투매 2배+ · 시장 1·2단계 ({cp})", f, np.where(m & np.isin(mk, [1, 2]))[0])
+    def show(lab, rows):
+        if not rows:
+            print(f"  [공포 매수] {lab}: 0건"); return
+        d = pd.DataFrame(rows)
+        parts = [f"{h}주 뒤 평균 {d[h].mean() * 100:+.1f}% (중앙값 {d[h].median() * 100:+.1f}% · 오른 비율 {(d[h] > 0).mean() * 100:.0f}%)" for h in H]
+        print(f"  [공포 매수] {lab}: {len(d)}건 · " + " · ".join(parts) + f" · 13주 안 추가 하락 평균 {d['dd'].mean() * 100:.1f}%")
+    for k in sorted(ev, key=lambda x: (("소형" in x), x)):
+        show(k, ev[k])
+    if "QQQ" in dfs:
+        q = S.indicators(dfs["QQQ"])
+        qe = (q["close"] / q["ma30"] - 1).values * 100
+        qok = q.index >= start
+        ev.clear()
+        add("QQQ 아무 주에나", q, np.where(qok & ~np.isnan(qe))[0][::4])
+        for th in (5, 10, 15):
+            add(f"QQQ 30주선 -{th}% 아래", q, np.where(qok & (qe <= -th))[0])
+        for k in ev:
+            show(k, ev[k])
+    return []
+
+
 def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
     """매수 점수 기준(70~85점)을 흔들기(시작 주 무작위 + 점수 ±3 흔들기)로 비교 · 80점과 비교해 나은 횟수도 셈"""
     sig0 = base_run[0]
@@ -3228,9 +3286,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(threshold_study(frames, cal, runs[ib], mp_i, fill_i, ms_i, capmap))
+        capitulation_study(frames, dfs, args.start, capmap)
     except Exception as ex:
-        print("  점수 기준 비교 실패:", ex)
+        print("  공포 매수 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
