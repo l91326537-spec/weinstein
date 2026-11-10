@@ -15,7 +15,7 @@ import screener as S
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "docs", "data")
 TDIR = os.path.join(DATA, "t")
-EXTRA = ["SPY", "QQQ", "KRW=X"]
+EXTRA = ["SPY", "QQQ", "KRW=X", "^VIX"]
 
 
 def r2(x, d=2):
@@ -127,6 +127,29 @@ def index_exit(df):
                 last=str(lf[-1].date()) if len(lf) else None, ma30=r2(ma.iloc[-1]), close=r2(c.iloc[-1]), slope=r2(sl.iloc[-1], 1))
 
 
+def fear_gauge(dfs):
+    """공포 지표: VIX(주봉 종가) + 하이일드 회사채 스프레드(FRED). 참고용 (매매 규칙에는 안 씀)"""
+    out = {}
+    if "^VIX" in dfs:
+        v = dfs["^VIX"]["Close"].dropna()
+        if len(v):
+            x = float(v.iloc[-1])
+            out.update(vix=r2(x, 1), vixHi52=r2(float(v.iloc[-52:].max()), 1),
+                       vixLvl="낮음" if x < 15 else "보통" if x < 25 else "높음" if x < 35 else "극단")
+    try:
+        import io, requests
+        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2", timeout=30, headers={"User-Agent": "Mozilla/5.0 (weinstein app)"})
+        r.raise_for_status()
+        d = pd.read_csv(io.StringIO(r.text)); d.columns = ["date", "v"]
+        h = pd.Series(pd.to_numeric(d["v"], errors="coerce").values, index=pd.to_datetime(d["date"])).dropna().resample("W-FRI").last().dropna()
+        avg = float(h.iloc[-26:].mean())
+        out.update(hy=r2(float(h.iloc[-1]), 2), hyAvg26=r2(avg, 2), hyChg13=r2(float(h.iloc[-1] - h.iloc[-14]), 2) if len(h) > 14 else None,
+                   hyWarn=bool(h.iloc[-1] > avg * 1.2))
+    except Exception as ex:
+        print("공포 지표(FRED) 받기 실패:", ex)
+    return out or None
+
+
 def market_breadth(dfs, uni, sectors, weeks=52):
     """와인스타인식 시장 폭 (참고용): 30주선 위 종목 비율, 52주 신고가-신저가, 업종 ETF 단계 분포"""
     C, M, NH, NL = {}, {}, {}, {}
@@ -234,6 +257,7 @@ def main(fetch=None, universe=None):
                    weekComplete=week_complete(), lastBar=str(dfs["^GSPC"].index[-1].date()) if "^GSPC" in dfs else None,
                    market=mk, worst=R["worst"], breadth=breadth, sectors=secs, candidates=cands,
                    exitSig={t: index_exit(dfs[t]) for t in ("QQQ", "SPY") if t in dfs},
+                   fear=fear_gauge(dfs),
                    index=sorted(index, key=lambda x: x["t"]),
                    counts=dict(total=len(rows), universe=len(uni), **{c: sum(1 for r in rows if r.get("cap") == c) for c in ("대형", "중형", "소형")}))
     with open(os.path.join(DATA, "summary.json"), "w", encoding="utf-8") as fh:

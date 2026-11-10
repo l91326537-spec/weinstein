@@ -1016,6 +1016,112 @@ def french_study():
     return []
 
 
+def fred_series(sid):
+    """FRED(미국 연준 경제 데이터) 일별 시계열 (키 없이 CSV)"""
+    import io, requests
+    r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=60, headers={"User-Agent": "Mozilla/5.0 (research backtest)"})
+    r.raise_for_status()
+    d = pd.read_csv(io.StringIO(r.text))
+    d.columns = ["date", "v"]
+    return pd.Series(pd.to_numeric(d["v"], errors="coerce").values, index=pd.to_datetime(d["date"])).dropna()
+
+
+def macro_study(dfs, cal, market, base_run, ms0):
+    """공포 지수(VIX)·신용 스프레드(하이일드 회사채 - 국채, FRED)가 와인스테인 규칙과 어울리는지:
+       ① VIX 높을 때 QQQ를 산 뒤 수익 ② QQQ 사고팔기: 와인스테인(시장 4단계면 현금)에 VIX 바닥 재매수·신용 스프레드 경고를 섞으면
+       ③ 개별주 신호를 낸 주의 VIX·신용 스프레드에 따라 성과가 다른가"""
+    if "^VIX" not in dfs or "QQQ" not in dfs:
+        print("  [공포 지표] VIX·QQQ 데이터 없음 → 건너뜀"); return []
+    vix = dfs["^VIX"]["Close"].reindex(cal, method="ffill")
+    qo, qc = dfs["QQQ"]["Open"].reindex(cal, method="ffill"), dfs["QQQ"]["Close"].reindex(cal, method="ffill")
+    mk = market.reindex(cal, method="ffill").shift(1)                     # 지난주 판단으로 이번 주 행동
+    try:
+        hy = fred_series("BAMLH0A0HYM2"); hy_nm = "하이일드 스프레드"
+    except Exception as ex:
+        print(f"  [공포 지표] 하이일드 스프레드 받기 실패({ex}) → BAA10Y로")
+        try:
+            hy = fred_series("BAA10Y"); hy_nm = "Baa 회사채 스프레드"
+        except Exception as ex2:
+            print(f"  [공포 지표] FRED 받기 실패: {ex2}"); hy = None; hy_nm = ""
+    if hy is not None:
+        hy = hy.resample("W-FRI").last().reindex(cal, method="ffill")
+        widen = (hy > hy.rolling(26).mean() * 1.2)
+        print(f"  [공포 지표] {hy_nm}: 지금 {hy.iloc[-1]:.2f}% · 26주 평균 {hy.rolling(26).mean().iloc[-1]:.2f}% · 경고(26주 평균의 1.2배 넘음) 비율 {widen.mean() * 100:.0f}%")
+    print(f"  [공포 지표] VIX 지금 {vix.iloc[-1]:.1f} · 52주 최고 {vix.iloc[-52:].max():.1f}")
+    # ① VIX 높을 때 QQQ 매수 뒤
+    c, o = qc.values, qo.values
+    def fwd(lab, idx):
+        rows, last = [], -99
+        for i in idx:
+            if i - last < 13 or i + 53 >= len(cal):
+                continue
+            last = i; e = o[i + 1]
+            rows.append({h: c[i + h] / e - 1 for h in (13, 26, 52)} | {"dd": np.nanmin(c[i + 1:i + 14]) / e - 1})
+        if not rows:
+            print(f"  [공포 지표] {lab}: 0건"); return
+        d = pd.DataFrame(rows)
+        print(f"  [공포 지표] {lab}: {len(d)}건 · " + " · ".join(f"{h}주 뒤 평균 {d[h].mean() * 100:+.1f}% (오른 비율 {(d[h] > 0).mean() * 100:.0f}%)" for h in (13, 26, 52))
+              + f" · 13주 안 추가 하락 평균 {d['dd'].mean() * 100:.1f}%")
+    v = vix.values; m4 = vix.rolling(4).max().values; mkv = mk.values
+    allw = np.arange(len(cal))
+    fwd("QQQ 아무 주에나", allw[::4])
+    for th in (25, 30, 40):
+        fwd(f"QQQ · VIX {th} 이상인 주", np.where(v >= th)[0])
+    peak = (m4 >= 35) & (v <= m4 * 0.8)
+    fwd("QQQ · VIX 35+ 찍고 20% 내려온 주 (공포 정점 지남)", np.where(peak)[0])
+    fwd("QQQ · VIX 30+ · 시장 4단계", np.where((v >= 30) & (mkv == 4))[0])
+    fwd("QQQ · VIX 30+ · 시장 4단계 아님", np.where((v >= 30) & (mkv != 4))[0])
+    if hy is not None:
+        fwd(f"QQQ · {hy_nm} 경고 중", np.where(widen.values)[0])
+    # ② QQQ 사고팔기
+    def sim(name, inpos):
+        eq, sh, cash, n_in = [], 0.0, 100.0, 0
+        for i in range(len(cal)):
+            want = bool(inpos[i])
+            if want and sh == 0 and o[i] > 0:
+                sh, cash = cash / o[i], 0.0
+            elif not want and sh > 0 and o[i] > 0:
+                cash, sh = sh * o[i], 0.0
+            n_in += want
+            eq.append(cash + sh * c[i])
+        e = pd.Series(eq, index=cal)
+        st = stats_curve(e)
+        yr = e.resample("YE").last().pct_change() * 100
+        g = lambda y: yr.get(pd.Timestamp(f"{y}-12-31"), np.nan)
+        print(f"  [공포 지표] QQQ {name}: 연평균 {f_(st.get('cagr'))}% · 최대낙폭 {f_(st.get('mdd'))}% · 보유 {n_in / len(cal) * 100:.0f}% · "
+              f"2008 {f_(g(2008))}% · 2020 {f_(g(2020))}% · 2022 {f_(g(2022))}%")
+    hold = np.ones(len(cal), bool)
+    w4 = mkv != 4
+    sim("그냥 보유", hold)
+    sim("와인스테인 (시장 4단계면 현금)", w4)
+    re_ = w4.copy(); k_end = -1
+    for i in range(len(cal)):
+        if peak[i - 1] if i > 0 else False:
+            k_end = i + 26
+        if i <= k_end:
+            re_[i] = True
+    sim("와인스테인 + VIX 공포 정점 지나면 26주 다시 보유", re_)
+    if hy is not None:
+        wv = np.r_[False, widen.values[:-1]]
+        sim(f"{hy_nm} 경고면 현금", ~wv)
+        sim(f"와인스테인 + {hy_nm} 경고면 현금", w4 & ~wv)
+        sim(f"와인스테인 + {hy_nm} 경고면 현금 + VIX 정점 재매수", (w4 & ~wv) | (re_ & ~w4))
+    # ③ 개별주 신호와 VIX·스프레드
+    sig0 = base_run[0]
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    sv = np.array([vix.asof(d) for d in sig0["sig_date"]], dtype=float)
+    hi = sig0["score"].values >= ms0
+    for lab, m in (("VIX 15 미만", sv < 15), ("VIX 15~25", (sv >= 15) & (sv < 25)), ("VIX 25~35", (sv >= 25) & (sv < 35)), ("VIX 35 이상", sv >= 35)):
+        a, b = stats_trades(sig0[m & nd]), stats_trades(sig0[m & nd & hi])
+        print(f"  [공포 지표] 개별주 신호 · {lab}: 모든 신호 {a.get('n', 0)}건 평균 {f_(a.get('avgR'))}R 승률 {f_(a.get('win'))}% · {ms0}점+ {b.get('n', 0)}건 평균 {f_(b.get('avgR'))}R 승률 {f_(b.get('win'))}%")
+    if hy is not None:
+        sw = np.array([bool(widen.asof(d)) if pd.notna(widen.asof(d)) else False for d in sig0["sig_date"]])
+        for lab, m in ((f"{hy_nm} 경고 중", sw), (f"{hy_nm} 정상", ~sw)):
+            a, b = stats_trades(sig0[m & nd]), stats_trades(sig0[m & nd & hi])
+            print(f"  [공포 지표] 개별주 신호 · {lab}: 모든 신호 {a.get('n', 0)}건 평균 {f_(a.get('avgR'))}R 승률 {f_(a.get('win'))}% · {ms0}점+ {b.get('n', 0)}건 평균 {f_(b.get('avgR'))}R 승률 {f_(b.get('win'))}%")
+    return []
+
+
 def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
     """매수 점수 기준(70~85점)을 흔들기(시작 주 무작위 + 점수 ±3 흔들기)로 비교 · 80점과 비교해 나은 횟수도 셈"""
     sig0 = base_run[0]
@@ -3479,7 +3585,7 @@ def main(argv=None, fetch=None, universe=None):
     if not S.ADR_BUY:      # 앱과 같게: 해외 ADR(내 관심 종목 제외)은 매수 대상에서 뺌
         uni = {k: v for k, v in uni.items() if v.get("src") not in ("adr", "adr_mid") or v.get("mine")}
     years = (pd.Timestamp.today() - start).days / 365.25 + 3      # 지표 계산용 3년 더
-    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ"]
+    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ", "^VIX"]
     print(f"{len(need)}개 종목의 약 {years:.0f}년치 주봉을 받습니다 (처음엔 5~15분 걸릴 수 있어요)")
     dfs = (fetch or (lambda n: S.fetch_weekly(n, years=years)))(need)
     if "^GSPC" not in dfs:
@@ -3593,6 +3699,10 @@ def main(argv=None, fetch=None, universe=None):
         capitulation_study(frames, dfs, args.start, capmap)
     except Exception as ex:
         print("  공포 매수 비교 실패:", ex)
+    try:
+        macro_study(dfs, cal, market, runs[ib], args.min_score)
+    except Exception as ex:
+        print("  [공포 지표] 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
