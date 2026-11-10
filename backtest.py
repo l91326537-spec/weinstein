@@ -786,11 +786,15 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
             cik2t.setdefault(int(v["cik_str"]), t)
     print(f"  [가치] SEC 종목 연결 {len(cik2t)}개")
     y_last = pd.Timestamp.today().year - 1
-    years = list(range(2009, y_last + 1))
+    years = list(range(2008, y_last + 1))
     C = {"oi": ("us-gaap", "OperatingIncomeLoss", "USD", ""), "ni": ("us-gaap", "NetIncomeLoss", "USD", ""),
          "cfo": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities", "USD", ""),
          "capex": ("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment", "USD", ""),
-         "assets": ("us-gaap", "Assets", "USD", "Q4I"), "float": ("dei", "EntityPublicFloat", "USD", "Q2I")}
+         "assets": ("us-gaap", "Assets", "USD", "Q4I"), "float": ("dei", "EntityPublicFloat", "USD", "Q2I"),
+         "rev": ("us-gaap", "Revenues", "USD", ""), "rev2": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax", "USD", ""),
+         "inv": ("us-gaap", "InventoryNet", "USD", "Q4I"), "eq": ("us-gaap", "StockholdersEquity", "USD", "Q4I"),
+         "ltd": ("us-gaap", "LongTermDebtNoncurrent", "USD", "Q4I"), "ltd2": ("us-gaap", "LongTermDebt", "USD", "Q4I"),
+         "div": ("us-gaap", "PaymentsOfDividends", "USD", ""), "div2": ("us-gaap", "PaymentsOfDividendsCommonStock", "USD", "")}
     F = {}
     for key, (tax, con, unit, suf) in C.items():
         cnt = []
@@ -822,8 +826,20 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
                 continue
             mc = fl * p_now / p0
             ni, cfo, cx = F.get(("ni", fy), {}).get(t), F.get(("cfo", fy), {}).get(t), F.get(("capex", fy), {}).get(t) or 0.0
+            g_ = lambda k, y: F.get((k, y), {}).get(t)
+            ni3 = g_("ni", fy - 3)
+            gr = ((ni / ni3) ** (1 / 3) - 1) if (ni is not None and ni3 is not None and ni > 0 and ni3 > 0) else np.nan
+            pe_ = mc / ni if (ni is not None and ni > 0) else np.nan
+            dv = (g_("div", fy) or g_("div2", fy) or 0.0) / mc
+            rv, rv1 = g_("rev", fy) or g_("rev2", fy), g_("rev", fy - 1) or g_("rev2", fy - 1)
+            iv, iv1 = g_("inv", fy), g_("inv", fy - 1)
+            inv_bad = bool(iv and iv1 and rv and rv1 and iv1 > 0 and rv1 > 0 and (iv / iv1) > (rv / rv1) * 1.1)
+            eqv, debt = g_("eq", fy), g_("ltd", fy) if g_("ltd", fy) is not None else g_("ltd2", fy)
+            de = (debt or 0.0) / eqv if eqv and eqv > 0 else np.nan
             rows.append(dict(t=t, mc=mc, ey=oi / mc, roa=oi / a, pe=(ni / mc) if ni is not None else np.nan,
-                             fcf=((cfo - cx) / mc) if cfo is not None else np.nan, stg=Stg.at[at, t] if at in Stg.index else np.nan))
+                             fcf=((cfo - cx) / mc) if cfo is not None else np.nan, stg=Stg.at[at, t] if at in Stg.index else np.nan,
+                             gr=gr, peg=(pe_ / (gr * 100)) if (pe_ > 0 and gr > 0) else np.nan,
+                             lyn=((gr + dv) * 100 / pe_) if (pe_ > 0 and gr == gr) else np.nan, de=de, inv_bad=inv_bad))
         d = pd.DataFrame(rows)
         if d.empty:
             return d
@@ -848,6 +864,13 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
                     "마법공식 상위 30 · 1·2단계만": list(mg[mg["stg"].isin([1, 2])]["t"][:n_hold]),
                     "마법공식 상위 30 · 2단계만": list(mg[mg["stg"] == 2]["t"][:n_hold]),
                     "마법공식 상위 30 · 4단계 되면 팔고 현금": list(mg["t"][:n_hold])}
+        pg = d[(d["gr"] >= 0.05) & (d["peg"] > 0)].sort_values("peg")
+        ly = d[(d["gr"] >= 0.15) & (d["gr"] <= 0.5) & (d["peg"] <= 1) & ~d["inv_bad"] & ~(d["de"] > 0.5)].sort_values("peg")
+        picks[Y].update({"[린치] PEG 낮은 30 (성장 5%+)": list(pg["t"][:n_hold]),
+                         "[린치] 종합 (성장 15~50% · PEG≤1 · 부채 적음 · 재고 정상)": list(ly["t"][:n_hold]),
+                         "[린치] 종합 · 2단계만": list(ly[ly["stg"] == 2]["t"][:n_hold]),
+                         "[린치] 린치 비율 2 이상": list(d[d["lyn"] >= 2].sort_values("lyn", ascending=False)["t"][:n_hold])})
+        print(f"  [가치] {Y}년 린치 종합 {len(ly)}개 · PEG 후보 {len(pg)}개")
         print(f"  [가치] {Y}년 5월: 후보 {len(d)}개 · 마법공식 상위 5 {list(mg['t'][:5])}")
     if not picks:
         print("  [가치] 고를 종목이 없음 → 건너뜀"); return []
@@ -899,12 +922,18 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
             ks = [idx[k] for k in starts] + [idx[-1]]
             r1 = [eq.asof(ks[i + 1]) / eq.asof(ks[i]) - spy.asof(ks[i + 1]) / spy.asof(ks[i]) for i in range(len(ks) - 1)]
             win = f" · SPY보다 나은 해 {sum(x > 0 for x in r1)}/{len(r1)}"
-        print(f"  [가치] {name}: 연평균 {f_(c.get('cagr'))}% · 최대낙폭 {f_(c.get('mdd'))}% · 2010~2018 {f_(a.get('cagr'))}% · 2018~ {f_(b.get('cagr'))}%{win}")
+        e1 = eq[eq.diff().fillna(0) != 0]
+        sw = ""
+        if spy is not None and len(e1) and e1.index[0] > eq.index[0] + pd.Timedelta(days=200):
+            sw = f" · (첫 매수 {e1.index[0].date()}부터) 같은 기간 이 전략 {f_(stats_curve(eq[eq.index >= e1.index[0]]).get('cagr'))}% vs SPY {f_(stats_curve(spy[spy.index >= e1.index[0]]).get('cagr'))}%"
+        print(f"  [가치] {name}: 연평균 {f_(c.get('cagr'))}% · 최대낙폭 {f_(c.get('mdd'))}% · 2010~2018 {f_(a.get('cagr'))}% · 2018~ {f_(b.get('cagr'))}%{win}{sw}")
         rows.append(curve_row(f"[가치] {name}", "SEC 재무 · 매년 5월 교체", eq))
     Y = max(picks)
     d = rank_year(Y + 1 if Y + 1 <= y_last + 1 else Y, idx[-1])
     if not d.empty:
         mg = d.dropna(subset=["magic"]).sort_values("magic").head(20)
+        ly = d[(d["gr"] >= 0.15) & (d["gr"] <= 0.5) & (d["peg"] <= 1) & ~d["inv_bad"] & ~(d["de"] > 0.5)].sort_values("peg").head(20)
+        print("  [가치] 지금 린치 종합 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · PEG {r.peg:.2f} · 성장 {r.gr * 100:.0f}%)" for r in ly.itertuples()))
         print("  [가치] 지금 마법공식 상위 20: " + ", ".join(f"{r.t}({int(r.stg) if pd.notna(r.stg) else '-'}단계 · 이익수익률 {r.ey * 100:.0f}%)" for r in mg.itertuples()))
     return rows
 
