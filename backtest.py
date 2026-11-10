@@ -662,6 +662,54 @@ def ride_study(frames, cal, start, base_run, ms0, mp, fill, msmall, capmap, buck
     return rows
 
 
+def chop_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8):
+    """'30주선 왕복': 신호 전 2년(104주) 동안 주봉 종가가 30주선 위아래로 오간 횟수. 자주 오간 종목의 돌파·풀백 성과가 나쁜지 보고
+       감점·제외 시안을 흔들기로 비교"""
+    for t, f in frames.items():
+        if "x30" in f:
+            continue
+        up = (f["close"] > f["ma30"]).astype(float).where(f["ma30"].notna())
+        f["x30"] = (up.diff().abs() == 1).astype(float).rolling(104, min_periods=78).sum()
+    sig0 = base_run[0]
+    xs = np.array([frames[t]["x30"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    ok = ~np.isnan(xs)
+    q1, q2 = np.nanpercentile(xs[ok & nd], [33, 67])
+    print(f"  [30주선 왕복] 2년 왕복 횟수 하위 1/3 ≤ {q1:.0f}번 · 상위 1/3 ≥ {q2:.0f}번 (중앙값 {np.nanmedian(xs[ok & nd]):.0f}번)")
+    hi80 = sig0["score"].values >= ms0
+    for lab, m in ((f"적게 왕복 (≤{q1:.0f}번)", xs <= q1), (f"중간 ({q1:.0f}~{q2:.0f}번)", (xs > q1) & (xs < q2)), (f"자주 왕복 (≥{q2:.0f}번)", xs >= q2)):
+        for nm, mm in (("모든 신호", m & nd & ok), (f"{ms0}점+", m & nd & ok & hi80)):
+            st = stats_trades(sig0[mm])
+            print(f"  [30주선 왕복] {nm} · {lab}: {st.get('n', 0)}건 · 승률 {f_(st.get('win'))}% · 평균 {f_(st.get('avgR'))}R · 3R+ {f_(st.get('big'))}% · 평균 수익 {f_(st.get('ret'))}%")
+    for tk in ("ATR", "FTV", "EG", "BRK-B", "MOH", "POOL"):
+        if tk in frames:
+            v = frames[tk]["x30"].dropna()
+            print(f"  [30주선 왕복] {tk} 지금 2년 왕복 {v.iloc[-1]:.0f}번" if len(v) else f"  [30주선 왕복] {tk} 자료 부족")
+    hit = (xs >= q2) & ok
+    variants = [("지금", sig0), (f"자주 왕복(≥{q2:.0f}번) -10점", sig0.assign(score=np.clip(sig0["score"].values - np.where(hit, 10, 0), 0, 100))),
+                (f"자주 왕복(≥{q2:.0f}번) 안 삼", sig0[~hit]), (f"적게 왕복(≤{q1:.0f}번) +5점", sig0.assign(score=np.clip(sig0["score"].values + np.where((xs <= q1) & ok, 5, 0), 0, 100)))]
+    rng = np.random.default_rng(37)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    rows = []
+    for nm, sg in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        rows.append(curve_row(f"[30주선 왕복] {nm}", f"거래 {len(t_)}건", e_["equity"]))
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 200:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        r_ = rows[-1]
+        print(f"  [30주선 왕복] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
+    return rows
+
+
 def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, n=8):
     """업종 분산 vs 강한 업종 집중: 지금(제한 없음) / 업종당 최대 1·2종목 / 그 주 업종 ETF RS 상위 2·3개 업종 종목만 / 상위 3개 + 업종당 최대 3.
        흔들기 n번(시작 주·순서)으로 중앙값 비교"""
@@ -685,7 +733,7 @@ def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
     plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
     rows = []
     for nm, sg, msec in variants:
-        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, max_sector=msec, secmap=secmap)
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, max_sector=msec, secmap=secmap if msec else None)
         rows.append(curve_row(f"[업종 집중] {nm}", f"거래 {len(t_)}건", e_["equity"]))
         cg, md, t0 = [], [], time.time()
         for k, seed in plan:
@@ -695,7 +743,7 @@ def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
             cal2 = cal[k:]
             sg2 = sg[sg["entry_date"] >= cal2[0]]
             sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
-            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk", max_sector=msec, secmap=secmap)
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk", max_sector=msec, secmap=secmap if msec else None)
             c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
         r_ = rows[-1]
         print(f"  [업종 집중] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 · 2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% | "
@@ -1277,6 +1325,125 @@ def climax_exit(frames, sig, thr, mode):
         s2.at[i, "R"] = (px - r["entry"]) / (r["entry"] - r["stop0"]) if r["entry"] > r["stop0"] else 0
         s2.at[i, "ret"] = (px / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
     return s2, n_hit
+
+
+def ext_exit(frames, sig, thr, mode):
+    """보유 중 금요일 주봉 종가가 30주선 대비 thr% 넘게 오르면(이격):
+       'half'    = 그 종가에 절반 매도 · 나머지는 원래 규칙(손절·4단계)
+       'half10'  = 절반 매도 · 나머지는 금요일 종가가 10주선 아래면 그 종가에 매도 (원래 규칙이 먼저면 그대로)
+       'trail10' = 팔지 않고 손절선만 10주선으로 (금요일 종가가 10주선 아래면 전부 매도)
+       'all'     = 그 종가에 전부 매도
+       절반 매도는 x1_date·x1로 남겨 run_portfolio가 실제로 반만 팔고 그 돈을 굴림. R·수익률은 두 가격을 반씩 섞은 값"""
+    s2 = sig.copy()
+    s2["x1_date"], s2["x1"] = pd.NaT, np.nan
+    n_hit = 0
+    for i, r in s2.iterrows():
+        f = frames.get(r["ticker"])
+        if f is None or r["entry_date"] not in f.index:
+            continue
+        j0 = f.index.get_loc(r["entry_date"])
+        has_ex = pd.notna(r["exit_date"]) and r["exit_date"] in f.index
+        ex = f.index.get_loc(r["exit_date"]) if has_ex else len(f) - 1
+        c, ma = f["close"].values, f["ma30"].values
+        k = next((j for j in range(j0, ex) if not math.isnan(ma[j]) and c[j] / ma[j] - 1 >= thr / 100), None)
+        if k is None:
+            continue
+        n_hit += 1
+        p_rest, d_rest = r["exit"], r["exit_date"]
+        if mode == "all":
+            p_rest, d_rest = c[k], f.index[k]
+        elif mode in ("half10", "trail10"):
+            ma10 = f["close"].rolling(10).mean().values
+            j = next((j for j in range(k + 1, ex) if not math.isnan(ma10[j]) and c[j] < ma10[j]), None)
+            if j is not None:
+                p_rest, d_rest = c[j], f.index[j]
+        if mode in ("half", "half10"):
+            s2.at[i, "x1_date"], s2.at[i, "x1"] = f.index[k], c[k]
+            px = 0.5 * c[k] + 0.5 * p_rest
+        else:
+            px = p_rest
+        s2.at[i, "exit"], s2.at[i, "exit_date"] = p_rest, d_rest
+        s2.at[i, "R"] = (px - r["entry"]) / (r["entry"] - r["stop0"]) if r["entry"] > r["stop0"] else 0
+        s2.at[i, "ret"] = (px / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
+        s2.at[i, "why"] = {"all": f"이격 {thr}% 매도", "trail10": "10주선 이탈"}.get(mode, r["why"]) if d_rest != r["exit_date"] or mode == "all" else r["why"]
+    return s2, n_hit
+
+
+def index_out_series(dfs, tk="QQQ"):
+    """지수 매도 신호를 시장 단계처럼 만든 것 (4 = 지수 팔아 둠, 2 = 보유). 앱 규칙과 같게:
+       4단계거나 30주선 반등 실패(30주선 평평·하락 중 아래에서 올라와 닿고 음봉·종가 30주선 아래)면 매도 → 주봉 종가가 30주선 위 + 4단계 아니면 다시 보유"""
+    f = S.indicators(dfs[tk])
+    stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).values
+    o, h, c, ma, sl = f["open"].values, f["high"].values, f["close"].values, f["ma30"].values, f["slope"].values
+    below = c < ma
+    fail = (sl <= S.CFG["flat_pct"]) & np.r_[False, below[:-1]] & (h >= ma * 0.99) & below & (c < o)
+    out, st = [], 2
+    for k in range(len(f)):
+        if stg[k] == 4 or fail[k]:
+            st = 4
+        elif st == 4 and not below[k]:
+            st = 2
+        out.append(st)
+    return pd.Series(out, index=f.index, dtype=float)
+
+
+def ext_exit_study(frames, cal, dfs, base_run, ms0, msmall, capmap, secmap, n=8):
+    """이격 매도 비교 (내 규칙 포트폴리오): 80점+ · 1회 손절 위험 0.5% · 최대 6종목 · 업종당 1종목 · 이격 15% 넘으면 안 삼 ·
+       개별주 합계 50% 이하(나머지는 QQQ, 지수 4단계·30주선 반등 실패 때 QQQ 매도) · 매도는 금요일 종가 손절(비상 -3%)·4단계.
+       보유 종목이 30주선 +30/40/50% 넘으면 ① 절반 매도 ② 절반 매도 + 나머지 10주선 이탈 ③ 손절선만 10주선 ④ 전부 매도 vs 그냥 보유.
+       흔들기 n번: 시작 주(0~52주 늦춤)·같은 주 신호 순서(점수 ±3)를 무작위로 바꿔 다시 돌림 (모든 방식에 같은 흔들기 사용)"""
+    if "QQQ" not in dfs:
+        return []
+    sig0 = base_run[0]
+    ext = np.array([frames[t]["ext"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    sg_b = sig0[ext < 15].copy()
+    q = dfs["QQQ"]
+    fill = dict(o=q["Open"], c=q["Close"], mkt=index_out_series(dfs), frac=1.0, half3=False, filt=True, band=25)
+    rng = np.random.default_rng(23)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    kw = dict(max_pos=6, fill=fill, max_small=msmall, caps=capmap, secmap=secmap, stk_cap=50)
+    variants = [("그냥 보유 (지금 규칙)", None, None)]
+    for thr in (30, 40, 50):
+        for mode, nm in (("half", "① 절반 매도 · 나머지 원래대로"), ("half10", "② 절반 매도 · 나머지 10주선 이탈 때"),
+                         ("trail10", "③ 팔지 않고 손절선만 10주선"), ("all", "④ 전부 매도")):
+            variants.append((f"+{thr}% 넘으면 {nm}", thr, mode))
+    rows, base_cg = [], None
+    old_r = BT["risk_pct"]
+    BT["risk_pct"] = 0.5
+    try:
+        for nm, thr, mode in variants:
+            t0 = time.time()
+            sg, nh = (sg_b, 0) if thr is None else ext_exit(frames, sg_b, thr, mode)
+            e_, t_ = run_portfolio(sg, frames, cal, ms0, **kw)
+            cg, md = [], []
+            for k, seed in plan:
+                if time.time() - t0 > 400:
+                    break
+                r2 = np.random.default_rng(seed)
+                cal2 = cal[k:]
+                sg2 = sg[sg["entry_date"] >= cal2[0]]
+                sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+                e2, _ = run_portfolio(sg2, frames, cal2, ms0, order="rk", **kw)
+                c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+            cg, md = np.array(cg, float), np.array(md, float)
+            if base_cg is None:
+                base_cg = cg
+            m = min(len(cg), len(base_cg))
+            win = int((cg[:m] > base_cg[:m]).sum())
+            ts = stats_trades(t_)
+            shake = (f"흔들기 {len(cg)}번: 연평균 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · "
+                     f"낙폭 중앙값 {f_(np.nanmedian(md))}%" + ("" if thr is None else f" · 그냥 보유보다 나은 횟수 {win}/{m}")) if len(cg) else "흔들기 없음"
+            desc = ((f"이격 도달 {nh}건 · " if thr is not None else "") +
+                    f"거래 {len(t_)}건 · 승률 {f_(ts.get('win'))}% · 평균 {f_(ts.get('avgR'), 2)}R · 평균 보유 {f_(ts.get('weeks'), 0)}주 · "
+                    f"평균 비중: 종목 {e_['stk'].mean():.0f}% + QQQ {e_['etf'].mean():.0f}% | {shake}")
+            r_ = curve_row(f"[이격 매도] {nm}", desc, e_["equity"])
+            r_["shake"] = dict(n=len(cg), med=np.nanmedian(cg) if len(cg) else np.nan, mdd=np.nanmedian(md) if len(md) else np.nan, win=win, m=m)
+            rows.append(r_)
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+                  f"2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% · {desc}")
+    finally:
+        BT["risk_pct"] = old_r
+    return rows
 
 
 def climax_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap):
@@ -2050,7 +2217,9 @@ def _victim(pos, frames, d, mode, new_score):
 
 
 def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_min=80, fill=None, max_small=None, caps=None, order=None, pause=None,
-                  max_sector=None, secmap=None):
+                  secmap=None, stk_cap=None, max_sector=None):
+    """secmap: {종목: 업종} 주면 업종당 1종목만 (max_sector 주면 그 수까지) · stk_cap: 개별주 합계가 계좌의 이 %를 넘지 않게 매수 (넘쳐도 팔지는 않음)
+       신호 행에 x1_date·x1(절반 매도 날짜·가격)이 있으면 그 주에 절반을 팔고 나머지는 exit_date·exit에 매도"""
     """pause: (n, k, mode) 손절(R<=0)이 n번 연속이면 mode='stop': k주 동안 신규 매수 쉼 / 'half': k주 동안 위험을 절반으로"""
     """order: 같은 주·같은 점수일 때 이 열이 작은 신호부터 (예: beta)
        추매 행(add=True): 같은 종목을 들고 있을 때만 사고, 종목 수에 세지 않음 · 수량은 위험 절반, 비중 상한 절반
@@ -2103,10 +2272,9 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 nbase = sum(1 for p in pos.values() if not p.get("add"))
                 if not is_add and max_small is not None and caps.get(r["ticker"]) == "소형" and sum(caps.get(x) == "소형" for x in pos) >= max_small:
                     continue
-                if not is_add and max_sector and secmap:          # 업종당 최대 종목 수
-                    sc_ = secmap.get(r["ticker"]) or "기타"
-                    if sum(1 for x, p_ in pos.items() if not p_.get("add") and (secmap.get(x) or "기타") == sc_) >= max_sector:
-                        continue
+                if not is_add and secmap is not None and secmap.get(r["ticker"]) and \
+                        sum(1 for x, p_ in pos.items() if not p_.get("add") and secmap.get(x) == secmap.get(r["ticker"])) >= (max_sector or 1):
+                    continue
                 if not is_add and nbase >= mp:
                     if not rotate or r["score"] < rot_min or not (r["rot_ok"] == True if "rot_ok" in r.index else True):
                         continue
@@ -2134,6 +2302,12 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
                 shares = equity * BT["risk_pct"] * k_ / 100 / risk_ps
                 liquid = cash + (etf_sh * eo if eo is not None else 0)
                 val = min(shares * r["entry"], equity * wcap * k_ / 100, liquid / (1 + 2 * cost))
+                if stk_cap is not None:
+                    held = 0.0
+                    for p_ in pos.values():
+                        px_ = frames[p_["r"]["ticker"]]["close"].asof(d - pd.Timedelta(days=1))
+                        held += p_["shares"] * (px_ if pd.notna(px_) else p_["r"]["entry"])
+                    val = min(val, equity * stk_cap / 100 - held)
                 if val < equity * 0.01:
                     continue
                 shares = val / r["entry"]
@@ -2147,6 +2321,12 @@ def run_portfolio(sig, frames, cal, min_score, max_pos=None, rotate=None, rot_mi
         # 2) 이번 주 청산
         for t in list(pos):
             p = pos[t]
+            x1d = p["r"].get("x1_date")
+            if not p.get("halved") and isinstance(x1d, pd.Timestamp) and x1d <= d:      # 절반 매도
+                half = p["shares"] / 2
+                cash += half * p["r"]["x1"] * (1 - cost)
+                p["shares"] -= half
+                p["halved"] = True
             if p["exit_date"] is not None and p["exit_date"] <= d:
                 cash += p["shares"] * p["exit"] * (1 - cost)
                 trades.append(p["r"])
@@ -3019,9 +3199,9 @@ def main(argv=None, fetch=None, universe=None):
                                                          secmap={t: v.get("sector") for t, v in uni.items()})
     _sec_bk = []
     try:
-        lev[0].extend(ride_study(frames, cal, args.start, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, _sec_bk))
+        lev[0].extend(chop_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
-        print("  30주선 타기 비교 실패:", ex)
+        print("  30주선 왕복 비교 실패:", ex)
     try:
         lev[0].extend(sector_rs_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}, _sec_bk))
     except Exception as ex:
@@ -3030,6 +3210,10 @@ def main(argv=None, fetch=None, universe=None):
         lev[0].extend(climax_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
         print("  과열 매도 비교 실패:", ex)
+    try:
+        lev[0].extend(ext_exit_study(frames, cal, dfs, runs[ib], args.min_score, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()}))
+    except Exception as ex:
+        print("  이격 매도 비교 실패:", ex)
     try:
         lev[0].extend(addon_profit_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap))
     except Exception as ex:
