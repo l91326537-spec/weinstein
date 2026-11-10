@@ -693,6 +693,35 @@ def capitulation_study(frames, dfs, start, capmap):
         add(f"아무 주에나 삼 ({cp})", f, base)
         for th in (25, 35):
             add(f"30주선 -{th}% 아래 ({cp})", f, np.where(ok & (ext <= -th))[0])
+        cm = np.where(ok & (vr >= 2) & down & (ext <= -20))[0]          # 투매 뒤 매도 방식 비교 (손절: 투매 주 저가 -1%)
+        hi_, lo_, o_, c_, ma_ = f["high"].values, f["low"].values, f["open"].values, f["close"].values, f["ma30"].values
+        last = -99
+        for i in cm:
+            if i - last < 13 or i + 27 >= len(f) or i < 1:
+                continue
+            last = i
+            e, stp = o_[i + 1], lo_[i] * 0.99
+            if not (e > stp > 0):
+                continue
+            for tname, tgt in (("투매 전 주 종가", c_[i - 1]), ("30주선", ma_[i])):
+                for mode in ("half", "all"):
+                    left, got, done = 1.0, 0.0, False
+                    for j in range(i + 1, i + 27):
+                        if lo_[j] <= stp:
+                            got += left * min(stp, o_[j]); left = 0; break
+                        if not done and tgt > e and hi_[j] >= tgt:
+                            q = 0.5 if mode == "half" else 1.0
+                            got += q * max(tgt, o_[j]); left -= q; done = True
+                            if left <= 0:
+                                break
+                    got += left * c_[i + 26]
+                    ev.setdefault(f"투매 뒤 · {tname}에서 {'절반' if mode == 'half' else '전부'} 매도 ({cp})", []).append(
+                        {4: np.nan, 13: np.nan, 26: got / e - 1, "dd": lo_[i + 1:i + 14].min() / e - 1})
+            got = c_[i + 26]
+            k_ = next((j for j in range(i + 1, i + 27) if lo_[j] <= stp), None)
+            if k_ is not None:
+                got = min(stp, o_[k_])
+            ev.setdefault(f"투매 뒤 · 매도 없이 26주 보유 · 손절만 ({cp})", []).append({4: np.nan, 13: np.nan, 26: got / e - 1, "dd": lo_[i + 1:i + 14].min() / e - 1})
         for vm in (2, 3):
             m = ok & (vr >= vm) & down & (ext <= -20)
             add(f"투매: 거래량 {vm}배+ 하락 · 30주선 -20% 아래 ({cp})", f, np.where(m)[0])
@@ -703,7 +732,7 @@ def capitulation_study(frames, dfs, start, capmap):
         if not rows:
             print(f"  [공포 매수] {lab}: 0건"); return
         d = pd.DataFrame(rows)
-        parts = [f"{h}주 뒤 평균 {d[h].mean() * 100:+.1f}% (중앙값 {d[h].median() * 100:+.1f}% · 오른 비율 {(d[h] > 0).mean() * 100:.0f}%)" for h in H]
+        parts = [f"{h}주 뒤 평균 {d[h].mean() * 100:+.1f}% (중앙값 {d[h].median() * 100:+.1f}% · 오른 비율 {(d[h] > 0).mean() * 100:.0f}%)" for h in H if d[h].notna().any()]
         print(f"  [공포 매수] {lab}: {len(d)}건 · " + " · ".join(parts) + f" · 13주 안 추가 하락 평균 {d['dd'].mean() * 100:.1f}%")
     for k in sorted(ev, key=lambda x: ({"대형": 0, "중형": 1, "소형": 2}.get(x[-3:-1], 3), x)):
         show(k, ev[k])
