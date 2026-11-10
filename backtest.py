@@ -722,6 +722,11 @@ def capitulation_study(frames, dfs, start, capmap):
             if k_ is not None:
                 got = min(stp, o_[k_])
             ev.setdefault(f"투매 뒤 · 매도 없이 26주 보유 · 손절만 ({cp})", []).append({4: np.nan, 13: np.nan, 26: got / e - 1, "dd": lo_[i + 1:i + 14].min() / e - 1})
+        upc = (f["close"] > f["close"].shift(1)).values
+        for vm in (2, 3):                                                # 큰 하락 뒤 대량 거래 양봉 (반전 신호)
+            add(f"반전: 거래량 {vm}배+ 상승 마감 · 30주선 -20% 아래 ({cp})", f, np.where(ok & (vr >= vm) & upc & (ext <= -20))[0])
+        add(f"반전 2배+ 상승 · 시장 3·4단계 ({cp})", f, np.where(ok & (vr >= 2) & upc & (ext <= -20) & np.isin(mk, [3, 4]))[0])
+        add(f"반전 2배+ 상승 · 시장 1·2단계 ({cp})", f, np.where(ok & (vr >= 2) & upc & (ext <= -20) & np.isin(mk, [1, 2]))[0])
         for vm in (2, 3):
             m = ok & (vr >= vm) & down & (ext <= -20)
             add(f"투매: 거래량 {vm}배+ 하락 · 30주선 -20% 아래 ({cp})", f, np.where(m)[0])
