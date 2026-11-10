@@ -1122,6 +1122,47 @@ def macro_study(dfs, cal, market, base_run, ms0):
     return []
 
 
+def index_long_study():
+    """와인스테인 시장 단계 규칙을 지수로 오래 확인 (S&P500 1928년~ · 나스닥 1971년~). 지수는 상장폐지 문제 없음.
+       가격 지수라 배당(S&P 연 2~4%)은 빠지고, 현금 이자도 0으로 둠 (두 효과가 어느 정도 상쇄)"""
+    import yfinance as yf
+    for tk, nm, st0 in (("^GSPC", "S&P500", "1927-12-01"), ("^IXIC", "나스닥", "1971-02-01")):
+        try:
+            d = yf.download(tk, start=st0, interval="1wk", auto_adjust=False, progress=False)
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.get_level_values(0)
+            d = d[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+        except Exception as ex:
+            print(f"  [긴 기간] {nm} 받기 실패: {ex}"); continue
+        if len(d) < 200:
+            print(f"  [긴 기간] {nm} 데이터 부족 ({len(d)}주)"); continue
+        f = S.indicators(d)
+        stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).shift(1).values      # 지난주 판단 → 이번 주 행동
+        c = f["close"].values
+        ret = np.r_[0, c[1:] / c[:-1] - 1]
+        idx = f.index
+        def run(lab, inpos):
+            eq = np.cumprod(1 + np.where(inpos, ret, 0.0))
+            e = pd.Series(eq, index=idx)
+            e = e[idx >= idx[60]]
+            st = stats_curve(e)
+            eras = [("~1949", None, "1949-12-31"), ("1950~1979", "1950-01-01", "1979-12-31"), ("1980~1999", "1980-01-01", "1999-12-31"),
+                    ("2000~2009", "2000-01-01", "2009-12-31"), ("2010~", "2010-01-01", None)]
+            parts = []
+            for en, a, b in eras:
+                m = np.ones(len(e), bool)
+                if a: m &= e.index >= pd.Timestamp(a)
+                if b: m &= e.index <= pd.Timestamp(b)
+                if m.sum() > 52:
+                    parts.append(f"{en} {f_(stats_curve(e[m]).get('cagr'))}% (낙폭 {f_(stats_curve(e[m]).get('mdd'))}%)")
+            print(f"  [긴 기간] {nm} {lab} ({e.index[0].year}~): 연평균 {f_(st.get('cagr'))}% · 최대낙폭 {f_(st.get('mdd'))}% · 보유 {np.mean(inpos[60:]) * 100:.0f}% · " + " · ".join(parts))
+        run("그냥 보유", np.ones(len(c), bool))
+        run("4단계면 현금 (지금 규칙)", stg != 4)
+        run("2단계일 때만 보유", stg == 2)
+        run("3·4단계면 현금", ~np.isin(stg, [3, 4]))
+    return []
+
+
 def threshold_study(frames, cal, base_run, mp, fill, msmall, capmap, n=8, levels=(70, 72, 75, 78, 80, 85)):
     """매수 점수 기준(70~85점)을 흔들기(시작 주 무작위 + 점수 ±3 흔들기)로 비교 · 80점과 비교해 나은 횟수도 셈"""
     sig0 = base_run[0]
@@ -3609,6 +3650,10 @@ def main(argv=None, fetch=None, universe=None):
         value_study(frames, dfs, uni, capmap, cal)
     except Exception as ex:
         print("  [가치] 가치투자 비교 실패:", ex)
+    try:
+        index_long_study()
+    except Exception as ex:
+        print("  [긴 기간] 지수 비교 실패:", ex)
     try:
         french_study()
     except Exception as ex:

@@ -707,6 +707,8 @@ def setup_tags(s):
     """백테스트(2006~)로 성과가 갈린 셋업 표시: [이름, 1=좋음/-1=주의, 근거]"""
     out, sig = [], s.get("signal")
     pbn, upw, ext, st = s.get("pb_n"), s.get("ma_up_weeks"), s.get("ext"), s.get("stage")
+    if s.get("event"):
+        out.append(["인수합병 공시", -1, f"최근 90일 SEC {s['event'][1]} 공시({s['event'][0]}) → 거래량은 차익거래·지수 조정 물량일 수 있어 수요로 안 침"])
     ok = lambda v: v is not None and not pd.isna(v)
     if sig == "돌파" and (s.get("base_len") or 0) >= 26 and (s.get("brk_vr") or 0) >= 2 and (s.get("rs") or -1) >= 0:
         out.append(["A급 돌파", 1, "기저 26주+ · 돌파 주 거래량 2배+ · RS 0+ → 평균 3.5R, 승률 35%"])
@@ -1325,6 +1327,7 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
                  buy_stop=round(s["res"] * 1.005, 2) if s["close"] <= s["res"]
                  else round(s["brk_level"] * 1.005, 2) if s["brk_level"] else None)
         s["signal"] = sig2
+        s["event"] = list(ev) if ev else None
         s["tags"] = setup_tags(s)
         rows.append(s)
     rows.sort(key=lambda r: -r["score"])
