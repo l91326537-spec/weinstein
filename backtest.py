@@ -681,7 +681,7 @@ def capitulation_study(frames, dfs, start, capmap):
             row["dd"] = lo[i + 1:i + 14].min() / e - 1
             ev.setdefault(key, []).append(row)
     for t, f in frames.items():
-        cp = "대·중형" if capmap.get(t) in ("대형", "중형") else "소형"
+        cp = capmap.get(t) if capmap.get(t) in ("대형", "중형", "소형") else "소형"
         if len(f) < 60:
             continue
         ok = (f.index >= start)
@@ -705,7 +705,7 @@ def capitulation_study(frames, dfs, start, capmap):
         d = pd.DataFrame(rows)
         parts = [f"{h}주 뒤 평균 {d[h].mean() * 100:+.1f}% (중앙값 {d[h].median() * 100:+.1f}% · 오른 비율 {(d[h] > 0).mean() * 100:.0f}%)" for h in H]
         print(f"  [공포 매수] {lab}: {len(d)}건 · " + " · ".join(parts) + f" · 13주 안 추가 하락 평균 {d['dd'].mean() * 100:.1f}%")
-    for k in sorted(ev, key=lambda x: (("소형" in x), x)):
+    for k in sorted(ev, key=lambda x: ({"대형": 0, "중형": 1, "소형": 2}.get(x[-3:-1], 3), x)):
         show(k, ev[k])
     if "QQQ" in dfs:
         q = S.indicators(dfs["QQQ"])
