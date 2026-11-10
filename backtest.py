@@ -822,6 +822,72 @@ def reversal_refine_study(frames, start, capmap, base_run, ms0):
     return []
 
 
+def sector_oversold_study(dfs, start, market):
+    """업종 ETF 과매도 분할 매수 vs 와인스테인식 업종 ETF 30주선 풀백. 업종 ETF는 망해서 사라질 일이 거의 없어 생존 편향이 작음.
+       과매도: 주봉 종가가 30주선 -20/-25% 아래 → 다음 주·4주 뒤·8주 뒤 시가에 1/3씩 매수, 손절 없이 52주 보유.
+       풀백: 2단계 + 저가가 30주선 +3% 안 + 종가는 30주선 위 → 다음 주 시가 매수, 주봉 종가가 30주선 -3% 아래면 다음 주 시가 매도, 최대 52주.
+       ETF마다 26주에 한 번만. 결과: 52주 수익 · 이익 비율 · 보유 중 최대 하락 · 독립된 사건 수(달 기준)"""
+    tks = [t for t in list(dict.fromkeys(list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF))) if t in dfs]
+    mk = market
+    R = {}
+    for t in tks:
+        try:
+            f = S.indicators(dfs[t])
+        except Exception:
+            continue
+        if len(f) < 80:
+            continue
+        stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).values
+        o, l, c, ma = f["open"].values, f["low"].values, f["close"].values, f["ma30"].values
+        ext = (c / ma - 1) * 100
+        vr = (f["vol"] / f["vol"].rolling(10).mean().shift(1)).values if "vol" in f else np.full(len(f), np.nan)
+        v4 = pd.Series(vr).rolling(4, min_periods=1).max().values
+        mkv = mk.reindex(f.index, method="ffill").values
+        ok = f.index >= start
+        n = len(f)
+        def rec(key, i, ret, dd):
+            R.setdefault(key, []).append(dict(t=t, d=f.index[i], r=ret, dd=dd))
+        def dca(key, m):
+            last = -99
+            for i in np.where(m)[0]:
+                if i - last < 26 or i + 53 >= n:
+                    continue
+                last = i
+                buys = [o[i + 1], o[i + 5], o[i + 9]]
+                cost = 3 / sum(1 / b for b in buys)
+                rec(key, i, c[i + 52] / cost - 1, np.nanmin(l[i + 1:i + 53]) / cost - 1)
+        base = ok & ~np.isnan(ext)
+        last = -99
+        for i in np.where(base)[0][::13]:
+            if i + 53 < n:
+                rec("아무 때나 (13주마다 한 번)", i, c[i + 52] / o[i + 1] - 1, np.nanmin(l[i + 1:i + 53]) / o[i + 1] - 1)
+        dca("과매도 30주선 -20% 아래 · 3번 나눠 사기", base & (ext <= -20))
+        dca("과매도 30주선 -25% 아래 · 3번 나눠 사기", base & (ext <= -25))
+        dca("과매도 -20% + 최근 4주 안 거래량 2배+", base & (ext <= -20) & (v4 >= 2))
+        dca("과매도 -20% · 시장 3·4단계", base & (ext <= -20) & np.isin(mkv, [3, 4]))
+        dca("과매도 -20% · 시장 1·2단계", base & (ext <= -20) & np.isin(mkv, [1, 2]))
+        last = -99
+        for i in np.where(base & (stg == 2) & (l <= ma * 1.03) & (c >= ma))[0]:
+            if i - last < 26 or i + 53 >= n:
+                continue
+            last = i
+            e = o[i + 1]; px = c[i + 52]; lo_ = np.nanmin(l[i + 1:i + 53])
+            for j in range(i + 1, i + 52):
+                if c[j] < ma[j] * 0.97:
+                    px = o[j + 1]; lo_ = np.nanmin(l[i + 1:j + 2]); break
+            rec("와인스테인 풀백 (2단계 · 30주선 근처 · 30주선 -3% 깨면 매도)", i, px / e - 1, lo_ / e - 1)
+    print(f"  [업종 과매도] 업종 ETF {len(tks)}개 · {start.date() if hasattr(start, 'date') else start}~")
+    for k, rows in R.items():
+        d = pd.DataFrame(rows)
+        months = d["d"].dt.to_period("M").nunique()
+        print(f"  [업종 과매도] {k}: {len(d)}건 (서로 다른 달 {months}개) · 52주 뒤 평균 {d['r'].mean() * 100:+.1f}% · 중앙값 {d['r'].median() * 100:+.1f}% · "
+              f"이익 비율 {(d['r'] > 0).mean() * 100:.0f}% · 보유 중 최대 하락 평균 {d['dd'].mean() * 100:.1f}% (가장 깊은 {d['dd'].min() * 100:.0f}%)")
+        if "과매도 30주선 -20%" in k:
+            yrs = d.groupby(d["d"].dt.year)["r"].agg(["count", "mean"])
+            print("  [업종 과매도]   연도별 (건수 · 평균): " + ", ".join(f"{y} {int(r['count'])}건 {r['mean'] * 100:+.0f}%" for y, r in yrs.iterrows()))
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -3816,6 +3882,10 @@ def main(argv=None, fetch=None, universe=None):
         reversal_refine_study(frames, args.start, capmap, runs[ib], args.min_score)
     except Exception as ex:
         print("  [반전 정밀] 비교 실패:", ex)
+    try:
+        sector_oversold_study(dfs, start, market)
+    except Exception as ex:
+        print("  [업종 과매도] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
