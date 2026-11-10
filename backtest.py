@@ -754,6 +754,74 @@ def capitulation_study(frames, dfs, start, capmap):
     return []
 
 
+def reversal_refine_study(frames, start, capmap, base_run, ms0):
+    """대량 양봉 반전(거래량 2배+ 상승 마감 · 30주선 -20% 아래)을 더 엄격하게: 종가가 주간 범위 위 1/3 · 다음 주 확인(종가 더 높고 저가 지킴) ·
+       최근 90일 인수합병 공시 제외. 손절 폭(반전 주 저가 · 매수가 -10/-20/-30% · 없음)별로 26주 결과와 R을 와인스테인 80점+ 신호와 비교. 대·중형만"""
+    use_sec = True
+    def has_event(t, d):
+        nonlocal use_sec
+        if not use_sec:
+            return False
+        e = S.sec_events(t, full=True)
+        if e is None:
+            use_sec = False; print("  [반전 정밀] SEC 공시 확인 실패 → 인수합병 거르기 없이 진행"); return False
+        return any(0 <= (pd.Timestamp(d) - pd.Timestamp(x[0])).days <= 90 for x in e)
+    V = {}
+    for t, f in frames.items():
+        if capmap.get(t) not in ("대형", "중형") or len(f) < 60:
+            continue
+        o, h, l, c = f["open"].values, f["high"].values, f["low"].values, f["close"].values
+        ext = (f["close"] / f["ma30"] - 1).values * 100
+        vr = (f["vol"] / f["vol"].rolling(10).mean().shift(1)).values
+        mk = f["mkt"].values
+        ok = f.index >= start
+        base = ok & (vr >= 2) & (np.r_[False, c[1:] > c[:-1]]) & (ext <= -20)
+        rng_ = np.where(h > l, (c - l) / np.where(h > l, h - l, 1), 0)
+        strong = rng_ >= 2 / 3
+        ft = np.r_[(c[1:] > c[:-1]) & (l[1:] >= l[:-1]), False]                 # 다음 주가 확인해 줌 (i 기준)
+        for nm, m, lag in (("기본 (거래량 2배+ 양봉)", base, 0), ("종가가 주간 범위 위 1/3", base & strong, 0),
+                           ("다음 주 확인", base & ft, 1), ("위 1/3 + 다음 주 확인", base & strong & ft, 1),
+                           ("위 1/3 + 다음 주 확인 · 시장 3·4단계", base & strong & ft & np.isin(mk, [3, 4]), 1)):
+            last = -99
+            for i in np.where(m)[0]:
+                k = i + lag                                                   # 판단한 주 (다음 주 확인이면 그다음 주 끝)
+                if k - last < 13 or k + 27 >= len(f):
+                    continue
+                last = k
+                V.setdefault(nm, []).append((t, f.index[k], k, l[i]))
+    def hold(f, k, stop):
+        o, l, c = f["open"].values, f["low"].values, f["close"].values
+        e = o[k + 1]
+        for j in range(k + 1, k + 27):
+            if stop and l[j] <= stop:
+                return min(stop, o[j]) / e - 1, True
+        return c[k + 26] / e - 1, False
+    sig0 = base_run[0]
+    w = sig0[(sig0["score"] >= ms0) & (~sig0["dup"] if "dup" in sig0 else True)]
+    sw = stats_trades(w)
+    print(f"  [반전 정밀] 비교 기준 · 와인스테인 {ms0}점+ 신호: {sw.get('n', 0)}건 · 승률 {f_(sw.get('win'))}% · 평균 {f_(sw.get('avgR'))}R · 평균 수익 {f_(sw.get('ret'))}% · 평균 보유 {f_(sw.get('weeks'), 0)}주 (손절 있음)")
+    for nm, evs in V.items():
+        ev2 = [x for x in evs if not has_event(x[0], x[1])] if use_sec else evs
+        for sn in ("없음", "반전 주 저가 -1%", "매수가 -10%", "매수가 -20%", "매수가 -30%"):
+            rr, Rs, hit = [], [], 0
+            for t, d, k, lowi in ev2:
+                f = frames[t]; e = f["open"].values[k + 1]
+                stop = {"없음": None, "반전 주 저가 -1%": lowi * 0.99, "매수가 -10%": e * 0.9, "매수가 -20%": e * 0.8, "매수가 -30%": e * 0.7}[sn]
+                if stop is not None and stop >= e:
+                    stop = e * 0.97
+                r, sx = hold(f, k, stop)
+                rr.append(r); hit += sx
+                if stop:
+                    Rs.append(r / (1 - stop / e))
+            if not rr:
+                continue
+            a = np.array(rr)
+            print(f"  [반전 정밀] {nm} · 손절 {sn}: {len(a)}건" + (f" (인수합병 공시 {len(evs) - len(ev2)}건 뺌)" if use_sec and sn == "없음" else "")
+                  + f" · 26주 뒤 이익 비율 {(a > 0).mean() * 100:.0f}% · 평균 {a.mean() * 100:+.1f}% · 중앙값 {np.median(a) * 100:+.1f}%"
+                  + (f" · 손절 닿음 {hit / len(a) * 100:.0f}% · 평균 {np.mean(Rs):.2f}R" if Rs else ""))
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -3744,6 +3812,10 @@ def main(argv=None, fetch=None, universe=None):
         capitulation_study(frames, dfs, args.start, capmap)
     except Exception as ex:
         print("  공포 매수 비교 실패:", ex)
+    try:
+        reversal_refine_study(frames, args.start, capmap, runs[ib], args.min_score)
+    except Exception as ex:
+        print("  [반전 정밀] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
