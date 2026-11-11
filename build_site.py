@@ -138,8 +138,16 @@ def fear_gauge(dfs):
                        vixLvl="낮음" if x < 15 else "보통" if x < 25 else "높음" if x < 35 else "극단")
     try:
         import io, requests
-        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2", timeout=30, headers={"User-Agent": "Mozilla/5.0 (weinstein app)"})
-        r.raise_for_status()
+        import time as _t
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2&cosd=" + (dt.date.today() - dt.timedelta(days=400)).isoformat()
+        for k in range(3):                       # FRED가 가끔 느려서 기간을 줄이고 3번까지 다시 시도
+            try:
+                r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0 (weinstein app)"})
+                r.raise_for_status(); break
+            except Exception:
+                if k == 2:
+                    raise
+                _t.sleep(5)
         d = pd.read_csv(io.StringIO(r.text)); d.columns = ["date", "v"]
         h = pd.Series(pd.to_numeric(d["v"], errors="coerce").values, index=pd.to_datetime(d["date"])).dropna().resample("W-FRI").last().dropna()
         avg = float(h.iloc[-26:].mean())

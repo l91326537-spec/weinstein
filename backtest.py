@@ -1153,8 +1153,14 @@ def french_study():
 def fred_series(sid):
     """FRED(미국 연준 경제 데이터) 일별 시계열 (키 없이 CSV)"""
     import io, requests
-    r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=60, headers={"User-Agent": "Mozilla/5.0 (research backtest)"})
-    r.raise_for_status()
+    for k in range(3):                           # FRED가 가끔 느려서 3번까지 다시 시도
+        try:
+            r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=120, headers={"User-Agent": "Mozilla/5.0 (research backtest)"})
+            r.raise_for_status(); break
+        except Exception:
+            if k == 2:
+                raise
+            time.sleep(10)
     d = pd.read_csv(io.StringIO(r.text))
     d.columns = ["date", "v"]
     return pd.Series(pd.to_numeric(d["v"], errors="coerce").values, index=pd.to_datetime(d["date"])).dropna()
