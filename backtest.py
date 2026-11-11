@@ -1175,18 +1175,13 @@ def macro_study(dfs, cal, market, base_run, ms0):
     vix = dfs["^VIX"]["Close"].reindex(cal, method="ffill")
     qo, qc = dfs["QQQ"]["Open"].reindex(cal, method="ffill"), dfs["QQQ"]["Close"].reindex(cal, method="ffill")
     mk = market.reindex(cal, method="ffill").shift(1)                     # 지난주 판단으로 이번 주 행동
-    try:
-        hy = fred_series("BAMLH0A0HYM2"); hy_nm = "하이일드 스프레드"
-    except Exception as ex:
-        print(f"  [공포 지표] 하이일드 스프레드 받기 실패({ex}) → BAA10Y로")
-        try:
-            hy = fred_series("BAA10Y"); hy_nm = "Baa 회사채 스프레드"
-        except Exception as ex2:
-            print(f"  [공포 지표] FRED 받기 실패: {ex2}"); hy = None; hy_nm = ""
+    hy, hy_nm = None, ""
+    if "HYG" in dfs and "IEF" in dfs:                # FRED는 GitHub 서버에서 자주 막혀서 ETF 비율로: 하이일드÷국채가 26주 평균보다 3% 넘게 낮으면 경고
+        hy = (dfs["HYG"]["Close"] / dfs["IEF"]["Close"].reindex(dfs["HYG"].index, method="ffill")).reindex(cal, method="ffill")
+        hy_nm = "신용 시장(HYG÷IEF)"
     if hy is not None:
-        hy = hy.resample("W-FRI").last().reindex(cal, method="ffill")
-        widen = (hy > hy.rolling(26).mean() * 1.2)
-        print(f"  [공포 지표] {hy_nm}: 지금 {hy.iloc[-1]:.2f}% · 26주 평균 {hy.rolling(26).mean().iloc[-1]:.2f}% · 경고(26주 평균의 1.2배 넘음) 비율 {widen.mean() * 100:.0f}%")
+        widen = (hy < hy.rolling(26).mean() * 0.97)
+        print(f"  [공포 지표] {hy_nm}: 지금 {hy.iloc[-1]:.3f} · 26주 평균 {hy.rolling(26).mean().iloc[-1]:.3f} · 경고(26주 평균보다 3% 넘게 낮음) 비율 {widen.mean() * 100:.0f}%")
     print(f"  [공포 지표] VIX 지금 {vix.iloc[-1]:.1f} · 52주 최고 {vix.iloc[-52:].max():.1f}")
     # ① VIX 높을 때 QQQ 매수 뒤
     c, o = qc.values, qo.values
@@ -3766,7 +3761,7 @@ def main(argv=None, fetch=None, universe=None):
     if not S.ADR_BUY:      # 앱과 같게: 해외 ADR(내 관심 종목 제외)은 매수 대상에서 뺌
         uni = {k: v for k, v in uni.items() if v.get("src") not in ("adr", "adr_mid") or v.get("mine")}
     years = (pd.Timestamp.today() - start).days / 365.25 + 3      # 지표 계산용 3년 더
-    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ", "^VIX"]
+    need = list(uni) + list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF) + list(S.MARKET) + ["SPY", "QQQ", "QLD", "TQQQ", "^VIX", "HYG", "IEF"]
     print(f"{len(need)}개 종목의 약 {years:.0f}년치 주봉을 받습니다 (처음엔 5~15분 걸릴 수 있어요)")
     dfs = (fetch or (lambda n: S.fetch_weekly(n, years=years)))(need)
     if "^GSPC" not in dfs:

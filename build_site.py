@@ -15,7 +15,7 @@ import screener as S
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "docs", "data")
 TDIR = os.path.join(DATA, "t")
-EXTRA = ["SPY", "QQQ", "KRW=X", "^VIX"]
+EXTRA = ["SPY", "QQQ", "KRW=X", "^VIX", "HYG", "IEF"]
 
 
 def r2(x, d=2):
@@ -136,25 +136,12 @@ def fear_gauge(dfs):
             x = float(v.iloc[-1])
             out.update(vix=r2(x, 1), vixHi52=r2(float(v.iloc[-52:].max()), 1),
                        vixLvl="낮음" if x < 15 else "보통" if x < 25 else "높음" if x < 35 else "극단")
-    try:
-        import io, requests
-        import time as _t
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2&cosd=" + (dt.date.today() - dt.timedelta(days=400)).isoformat()
-        for k in range(3):                       # FRED가 가끔 느려서 기간을 줄이고 3번까지 다시 시도
-            try:
-                r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0 (weinstein app)"})
-                r.raise_for_status(); break
-            except Exception:
-                if k == 2:
-                    raise
-                _t.sleep(5)
-        d = pd.read_csv(io.StringIO(r.text)); d.columns = ["date", "v"]
-        h = pd.Series(pd.to_numeric(d["v"], errors="coerce").values, index=pd.to_datetime(d["date"])).dropna().resample("W-FRI").last().dropna()
-        avg = float(h.iloc[-26:].mean())
-        out.update(hy=r2(float(h.iloc[-1]), 2), hyAvg26=r2(avg, 2), hyChg13=r2(float(h.iloc[-1] - h.iloc[-14]), 2) if len(h) > 14 else None,
-                   hyWarn=bool(h.iloc[-1] > avg * 1.2))
-    except Exception as ex:
-        print("공포 지표(FRED) 받기 실패:", ex)
+    if "HYG" in dfs and "IEF" in dfs:              # 신용 시장: 하이일드 채권 ETF ÷ 국채 ETF (떨어지면 신용 스프레드가 벌어지는 것)
+        r = (dfs["HYG"]["Close"] / dfs["IEF"]["Close"].reindex(dfs["HYG"].index, method="ffill")).dropna()
+        if len(r) > 30:
+            avg = float(r.iloc[-26:].mean())
+            out.update(cr=r2(float(r.iloc[-1]), 3), crChg13=r2((float(r.iloc[-1]) / float(r.iloc[-14]) - 1) * 100, 1),
+                       crWarn=bool(r.iloc[-1] < avg * 0.97))
     return out or None
 
 

@@ -303,9 +303,9 @@ function exitWarn() {
 function fearRow(F) {
   if (!F || F.vix == null) return "";
   const cls = { "낮음": "st2", "보통": "st1", "높음": "st3", "극단": "st4" }[F.vixLvl] || "st1";
-  const hy = F.hy != null ? `<div class="row between"><span>신용 스프레드 <span class="muted" style="font-size:11px">하이일드−국채</span></span><span class="row"><span class="mono">${fmt(F.hy, 2)}%</span>${F.hyChg13 != null ? `<span class="mono muted" style="font-size:12px">13주 ${F.hyChg13 > 0 ? "+" : ""}${fmt(F.hyChg13, 2)}%p</span>` : ""}${F.hyWarn ? `<span class="pill st4">경고</span>` : ""}</span></div>` : "";
+  const hy = F.cr != null ? `<div class="row between"><span>신용 시장 <span class="muted" style="font-size:11px">하이일드÷국채 ETF</span></span><span class="row"><span class="mono muted" style="font-size:12px">13주 ${F.crChg13 > 0 ? "+" : ""}${fmt(F.crChg13, 1)}%</span>${F.crWarn ? `<span class="pill st4">경고</span>` : `<span class="pill st2">정상</span>`}</span></div>` : "";
   return `<div class="row between"><span>공포 지수 VIX</span><span class="row"><span class="pill ${cls}">${esc(F.vixLvl)}</span><span class="mono">${fmt(F.vix, 1)}</span><span class="mono muted" style="font-size:12px">52주 최고 ${fmt(F.vixHi52, 1)}</span></span></div>${hy}
-    <p class="note">VIX 15 미만 낮음 · 15~25 보통 · 25~35 높음 · 35 이상 극단. 신용 스프레드가 26주 평균의 1.2배를 넘으면 경고. 참고용이에요 — 와인스테인 규칙과 섞었을 때 나은지는 백테스트로 확인 중.</p>`;
+    <p class="note">VIX 15 미만 낮음 · 15~25 보통 · 25~35 높음 · 35 이상 극단. 신용 시장은 하이일드 채권(HYG)이 국채(IEF)보다 26주 평균 대비 3% 넘게 약하면 경고 — 회사채 위험이 커진다는 뜻. 참고용이에요 — 와인스테인 규칙과 섞었을 때 나은지는 백테스트로 확인 중.</p>`;
 }
 async function viewHome(v) {
   const mk = SUM.market, worst = SUM.worst;
