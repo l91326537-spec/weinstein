@@ -888,6 +888,71 @@ def sector_oversold_study(dfs, start, market):
     return []
 
 
+def sleeve_combo_study(dfs, cal, market, main_eq):
+    """지금 시스템(와인스테인 80점+ · 남는 돈 QQQ)에 '공포 바구니'를 섞으면: 시장 3·4단계 + 업종 ETF 주봉 종가가 30주선 -20% 아래 →
+       바구니 돈의 20%를 그 ETF에 3번(그다음 주·4주 뒤·8주 뒤) 나눠 사서 52주 뒤 매도 (손절 없음 · 동시에 최대 5개 · 같은 ETF는 26주에 한 번).
+       바구니가 놀 때는 현금(이자 0). 계좌를 매주 '시스템 : 바구니' 비율로 맞춘다고 보고 합침 (근사)"""
+    tks = [t for t in list(dict.fromkeys(list(S.SECTOR_ETF.values()) + list(S.INDUSTRY_ETF))) if t in dfs]
+    C, E = {}, {}
+    mk = market.reindex(cal, method="ffill").values
+    for t in tks:
+        try:
+            f = S.indicators(dfs[t])
+        except Exception:
+            continue
+        C[t] = f["close"].reindex(cal, method="ffill", limit=2).values
+        E[t] = ((f["close"] / f["ma30"] - 1) * 100).reindex(cal, method="ffill", limit=2).values
+    n = len(cal)
+    q = dfs["QQQ"]["Close"].reindex(cal, method="ffill").values if "QQQ" in dfs else np.ones(n)
+    def run(idle):
+        cash, qsh, pos, last_sig, val, inv, n_ev = 100.0, 0.0, [], {}, [], [], 0
+        for i in range(n):
+            if idle == "QQQ" and qsh == 0 and cash > 0 and q[i] > 0:
+                qsh, cash = cash / q[i], 0.0
+            liquid = cash + qsh * q[i]
+            for p in list(pos):                                   # 분할 매수 · 52주 뒤 매도
+                px = C[p["t"]][i]
+                if not (px > 0):
+                    continue
+                p["last"] = px
+                if i in p["buys"] and liquid > 0:
+                    amt = min(p["budget"] / 3, liquid)
+                    p["sh"] += amt / px; liquid -= amt
+                if i >= p["end"]:
+                    liquid += p["sh"] * px; pos.remove(p)
+            held = sum(p["sh"] * p["last"] for p in pos)
+            V = liquid + held
+            if i + 1 < n and mk[i] in (3, 4) and len(pos) < 5:
+                for t in tks:
+                    e = E[t][i]
+                    if e == e and e <= -20 and i - last_sig.get(t, -999) >= 26 and len(pos) < 5 and not any(p["t"] == t for p in pos):
+                        last_sig[t] = i; n_ev += 1
+                        pos.append(dict(t=t, sh=0.0, last=C[t][i], budget=V * 0.2, buys={i + 1, i + 5, i + 9}, end=i + 53))
+            if idle == "QQQ" and q[i] > 0:
+                qsh, cash = liquid / q[i], 0.0
+            else:
+                cash, qsh = liquid, 0.0
+            val.append(V); inv.append(held / V if V > 0 else 0)
+        return pd.Series(val, index=cal), float(np.mean(inv)), n_ev
+    me = main_eq.reindex(cal, method="ffill").dropna()
+    rm = me.pct_change().fillna(0)
+    def show(nm, eq):
+        st = stats_curve(eq)
+        yr = eq.resample("YE").last().pct_change() * 100
+        g = lambda y: yr.get(pd.Timestamp(f"{y}-12-31"), np.nan)
+        print(f"  [공포 바구니] {nm}: 연평균 {f_(st.get('cagr'))}% · 최대낙폭 {f_(st.get('mdd'))}% · 2008 {f_(g(2008))}% · 2009 {f_(g(2009))}% · 2020 {f_(g(2020))}% · 2022 {f_(g(2022))}% · 2023 {f_(g(2023))}%")
+    show("지금 시스템만", me / me.iloc[0] * 100)
+    for idle, lab in (("cash", "놀 때 현금"), ("QQQ", "놀 때 QQQ")):
+        sl, inv, n_ev = run(idle)
+        sl = sl.reindex(me.index)
+        rs = sl.pct_change().fillna(0)
+        print(f"  [공포 바구니] ({lab}) 매수 사건 {n_ev}건 · 바구니 돈 중 업종 ETF에 들어간 비율 평균 {inv * 100:.0f}%")
+        show(f"바구니만 ({lab})", sl / sl.iloc[0] * 100)
+        for w in (0.05, 0.10, 0.20):
+            show(f"시스템 {int(round((1 - w) * 100))}% + 바구니 {int(w * 100)}% ({lab})", (1 + (1 - w) * rm + w * rs).cumprod() * 100)
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -3887,6 +3952,10 @@ def main(argv=None, fetch=None, universe=None):
         sector_oversold_study(dfs, start, market)
     except Exception as ex:
         print("  [업종 과매도] 비교 실패:", ex)
+    try:
+        sleeve_combo_study(dfs, cal, market, runs[ib][1]["equity"])
+    except Exception as ex:
+        print("  [공포 바구니] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:

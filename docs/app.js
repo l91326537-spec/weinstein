@@ -273,6 +273,16 @@ function chartStep(td, view, act) {
 
 /* ---------- 화면: 홈 ---------- */
 /* 시장 위험 신호 (참고): 30주선 위 종목 비율, 신고가-신저가, 업종 단계 분포. 매매 규칙에는 쓰지 않음 */
+/* 공포 바구니: 시장 3·4단계 + 업종 ETF 30주선 -20% 아래 (백테스트 2006~: 시장 3·4단계일 때만 통함) */
+function fearBuyCard() {
+  const w = SUM?.worst;
+  if (w !== 3 && w !== 4) return "";
+  const c = (SUM.sectors || []).filter(s => s.ext != null && s.ext <= -20).sort((a, b) => a.ext - b.ext);
+  return `<section class="card"><div class="row between"><h3>공포 바구니 (업종 ETF)</h3><span class="tag">${c.length ? `후보 ${c.length}개` : "후보 없음"}</span></div>
+    ${c.length ? `<div class="list">${c.map(s => `<a class="item" href="#stock/${encodeURIComponent(s.etf)}">${pill(s.stage)}<span style="min-width:0"><b>${esc(s.name)}</b> <span class="mono muted" style="font-size:12px">${esc(s.etf)}</span></span><span class="r"><span class="muted" style="font-size:11px">30주선</span><b class="neg">${pct(s.ext)}</b></span></a>`).join("")}</div>`
+      : `<p class="note">시장이 ${w}단계예요. 30주선보다 20% 넘게 빠진 업종 ETF가 생기면 여기에 떠요.</p>`}
+    <p class="note">규칙(시험용): 시장 3·4단계 + 업종 ETF 주봉 종가가 30주선 -20% 아래 → 계좌의 5~10% 안에서 지금·4주 뒤·8주 뒤 3번 나눠 사고 손절 없이 1년 보유. 같은 ETF는 반년에 한 번. 백테스트(2006~, 업종 ETF 55개): 1년 뒤 중앙값 +25%, 76% 이익 · 그 사이 평균 -27% 더 빠짐 · 2008·2020·2022에 몰림. 시장 1·2단계에서 한 업종만 빠진 건 손해(중앙값 -4.5%)라 안 사요.</p></section>`;
+}
 function breadthCard(b) {
   if (!b) return "";
   const h = (b.hist || []).filter(x => x != null), W = 300, H = 90;
@@ -320,6 +330,7 @@ async function viewHome(v) {
     ${exitWarn()}
     ${fearRow(SUM.fear)}
   </section>
+  ${fearBuyCard()}
   ${breadthCard(SUM.breadth)}
   <section class="card" id="alerts" hidden></section>
   <section class="card"><div class="row between"><h2>지금 볼 후보</h2><a class="btn sm" href="#cands">전체</a></div>
