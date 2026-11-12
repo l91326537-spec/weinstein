@@ -953,6 +953,35 @@ def sleeve_combo_study(dfs, cal, market, main_eq):
     return []
 
 
+def sector_r_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap):
+    """업종별 신호 성과: 평균 R · 승률 · 평균 수익 % · 평균 손절 폭 % (덜 오르는 업종이 R로도 덜 버는지) + 업종 하나씩 뺀 포트폴리오"""
+    sig0 = base_run[0]
+    nd = ~sig0["dup"] if "dup" in sig0 else pd.Series(True, index=sig0.index)
+    d = sig0[nd].copy()
+    d["sec"] = d["ticker"].map(secmap).fillna("기타")
+    d["stopp"] = (d["entry"] - d["stop0"]) / d["entry"] * 100
+    rows = []
+    for sec, g in d.groupby("sec"):
+        a, b = stats_trades(g), stats_trades(g[g["score"] >= ms0])
+        rows.append((sec, len(g), a, b, g["stopp"].median(), (g["R"] >= 3).mean() * 100))
+    rows.sort(key=lambda r: -(r[3].get("avgR") or -9) if r[3].get("n", 0) >= 15 else 9)
+    for sec, n, a, b, sp, big in rows:
+        if n < 30:
+            continue
+        print(f"  [업종별 R] {sec}: 모든 신호 {n}건 · 승률 {f_(a.get('win'))}% · 평균 {f_(a.get('avgR'))}R · 평균 수익 {f_(a.get('ret'))}% · 손절 폭 중앙값 {sp:.1f}% · 3R+ {big:.0f}% | "
+              f"{ms0}점+ {b.get('n', 0)}건 · 승률 {f_(b.get('win'))}% · 평균 {f_(b.get('avgR'))}R · 평균 수익 {f_(b.get('ret'))}%")
+    e0, t0 = run_portfolio(sig0, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+    c0 = stats_curve(e0["equity"])
+    print(f"  [업종별 R] 포트폴리오 · 지금: 연평균 {f_(c0.get('cagr'))}% · 최대낙폭 {f_(c0.get('mdd'))}%")
+    big_secs = [r[0] for r in rows if r[3].get("n", 0) >= 40]
+    for sec in big_secs:
+        sg = sig0[sig0["ticker"].map(secmap).fillna("기타") != sec]
+        e_, _ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        c = stats_curve(e_["equity"])
+        print(f"  [업종별 R] 포트폴리오 · {sec} 빼면: 연평균 {f_(c.get('cagr'))}% · 최대낙폭 {f_(c.get('mdd'))}%")
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -3956,6 +3985,10 @@ def main(argv=None, fetch=None, universe=None):
         sleeve_combo_study(dfs, cal, market, runs[ib][1]["equity"])
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
+    try:
+        sector_r_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()})
+    except Exception as ex:
+        print("  [업종별 R] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
