@@ -982,6 +982,41 @@ def sector_r_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap)
     return []
 
 
+def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secmap, n=8):
+    """업종 가점·감점 시안을 흔들기로: 소재·에너지 -10 / 안 삼 · 기술·경기소비재·헬스케어 +5 · 둘 다"""
+    sig0 = base_run[0]
+    sec = sig0["ticker"].map(secmap).fillna("")
+    weak = sec.isin(["Materials", "Energy"]).values
+    strong = sec.isin(["Information Technology", "Consumer Discretionary", "Health Care"]).values
+    sc = sig0["score"].values
+    variants = [("지금", sig0), ("소재·에너지 -10점", sig0.assign(score=np.clip(sc - np.where(weak, 10, 0), 0, 100))),
+                ("소재·에너지 안 삼", sig0[~weak]), ("기술·경기소비재·헬스케어 +5점", sig0.assign(score=np.clip(sc + np.where(strong, 5, 0), 0, 100))),
+                ("둘 다 (소재·에너지 -10 · 셋 +5)", sig0.assign(score=np.clip(sc - np.where(weak, 10, 0) + np.where(strong, 5, 0), 0, 100)))]
+    rng = np.random.default_rng(43)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    res = {}
+    for nm, sg in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        c1 = stats_curve(e_["equity"])
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 200:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        res[nm] = (c1, len(t_), cg, md)
+    base = res["지금"][2]
+    for nm, (c1, nt, cg, md) in res.items():
+        win = "" if nm == "지금" else f" · 지금보다 나은 횟수 {sum(1 for a, b in zip(cg, base) if a > b)}/{min(len(cg), len(base))}"
+        print(f"  [업종 가감점] {nm}: 한 번 연평균 {f_(c1.get('cagr'))}% · 최대낙폭 {f_(c1.get('mdd'))}% · 거래 {nt}건 | 흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% "
+              f"(하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%{win}")
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -3986,9 +4021,9 @@ def main(argv=None, fetch=None, universe=None):
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
     try:
-        sector_r_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()})
+        sector_tilt_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()})
     except Exception as ex:
-        print("  [업종별 R] 비교 실패:", ex)
+        print("  [업종 가감점] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
