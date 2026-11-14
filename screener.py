@@ -44,6 +44,7 @@ CFG = {
     "use_chop": False,       # 30주선을 자주 들락날락하는 종목 감점 (백테스트 결과로 결정)
     "use_dump": False,       # 큰 거래량 동반 급락 이력 감점 (백테스트 결과로 결정)
     "no_sector_pts": 10,     # 업종 ETF를 못 찾은 종목은 업종 점수를 중립으로
+    "weak_sector_pen": 10,   # 소재·에너지 감점 (백테스트 2006~: 80점+ 신호 평균 -0.2R · 흔들기 8번 중 7번 나음)
     "squeeze_pts": 0,        # 볼린저 수축(최근 8주 안에 밴드 폭이 52주 하위 25%) 뒤 돌파·풀백 가점. 신호는 2.23R vs 1.95R로 낫지만
                              # 포트폴리오에서 +3·+5·+8 모두 수익 개선 없이 최대 낙폭만 커져(+5: -27% → -33%) 끔
     "b12_pts": 10,           # 1→2단계 돌파 가점 (먼저 사도록)
@@ -223,6 +224,7 @@ def _nasdaq_screener():
 
 
 CAP_ORDER = {"대형": 0, "중형": 1, "소형": 2}
+WEAK_SECTORS = {"Materials", "Energy"}   # GICS 업종 이름
 ADR_BUY = False              # 해외 ADR(내 관심 종목 제외)에 매수 신호를 낼지. 백테스트에서 넣으면 성과가 나빠 끔
 SECTOR_FIX = {"ASML": "Information Technology", "MSTR": "Information Technology", "ALNY": "Health Care",
               "MELI": "Consumer Discretionary", "SHOP": "Information Technology", "CCEP": "Consumer Staples",
@@ -1310,6 +1312,9 @@ def compute(quick=False, fetch=fetch_weekly, universe=None, extra=()):
             sig2 = ""
         if ev:
             caps = caps + [f"이벤트성 거래량 의심 ({ev[0]} SEC {ev[1]} 공시 · 인수합병/주식교환) · 거래량 점수 제외"]
+        if CFG["weak_sector_pen"] and info.get("sector") in WEAK_SECTORS:
+            score = max(0, score - CFG["weak_sector_pen"])
+            caps = caps + [f"소재·에너지 업종 -{CFG['weak_sector_pen']} (백테스트상 성과 저조)"]
         if not ADR_BUY and info.get("src") in ("adr", "adr_mid") and not info.get("mine") and sig2:
             sig2 = ""                 # 백테스트: 해외 ADR을 넣으면 연평균 15.4% → 12.1% (신호 평균 1.5R vs 지수 종목 2.7R) → 매수 신호는 끔
             caps = caps + ["해외 ADR · 매수 신호 제외 (백테스트상 성과 저조)"]

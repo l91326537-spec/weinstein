@@ -989,7 +989,7 @@ def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
     weak = sec.isin(["Materials", "Energy"]).values
     strong = sec.isin(["Information Technology", "Consumer Discretionary", "Health Care"]).values
     sc = sig0["score"].values
-    variants = [("지금", sig0), ("소재·에너지 -10점", sig0.assign(score=np.clip(sc - np.where(weak, 10, 0), 0, 100))),
+    variants = [("지금 (소재·에너지 -10 반영됨)", sig0), ("소재·에너지 감점 없음", sig0.assign(score=np.clip(sc + np.where(weak, 10, 0), 0, 100))),
                 ("소재·에너지 안 삼", sig0[~weak]), ("기술·경기소비재·헬스케어 +5점", sig0.assign(score=np.clip(sc + np.where(strong, 5, 0), 0, 100))),
                 ("둘 다 (소재·에너지 -10 · 셋 +5)", sig0.assign(score=np.clip(sc - np.where(weak, 10, 0) + np.where(strong, 5, 0), 0, 100)))]
     rng = np.random.default_rng(43)
@@ -1009,9 +1009,9 @@ def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
             e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
             c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
         res[nm] = (c1, len(t_), cg, md)
-    base = res["지금"][2]
+    base = res[next(iter(res))][2]
     for nm, (c1, nt, cg, md) in res.items():
-        win = "" if nm == "지금" else f" · 지금보다 나은 횟수 {sum(1 for a, b in zip(cg, base) if a > b)}/{min(len(cg), len(base))}"
+        win = "" if nm == next(iter(res)) else f" · 지금보다 나은 횟수 {sum(1 for a, b in zip(cg, base) if a > b)}/{min(len(cg), len(base))}"
         print(f"  [업종 가감점] {nm}: 한 번 연평균 {f_(c1.get('cagr'))}% · 최대낙폭 {f_(c1.get('mdd'))}% · 거래 {nt}건 | 흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% "
               f"(하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%{win}")
     return []
@@ -3932,7 +3932,12 @@ def main(argv=None, fetch=None, universe=None):
         pattern_study(frames, start, capmap)
     except Exception as ex:
         print("  패턴 분석 실패:", ex)
-    CV = lambda **kw: collect_variant(frames, start, "base", "stop", caps=capmap, **kw)
+    _weak = {t for t, v in uni.items() if v.get("sector") in S.WEAK_SECTORS}
+    def _sec_pen(sg):                                 # 앱과 같게: 소재·에너지 -10점
+        if S.CFG.get("weak_sector_pen") and len(sg) and "ticker" in sg:
+            sg = sg.assign(score=np.clip(sg["score"].values - np.where(sg["ticker"].isin(_weak), S.CFG["weak_sector_pen"], 0), 0, 100))
+        return sg
+    CV = lambda **kw: _sec_pen(collect_variant(frames, start, "base", "stop", caps=capmap, **kw))
     ATRV = dict(atr=True)
     OUT = dict(out=True)
     TP = "score2TPt"
