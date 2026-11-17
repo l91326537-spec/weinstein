@@ -161,7 +161,13 @@ THEME_LIST = {
 }
 # 나스닥 업종이 실제 사업과 다른 종목의 대표 업종 고치기
 THEME_FIX = {"GE": ("항공우주·방산", "ITA"), "ETN": ("전력망·전기장비", "GRID"), "GEV": ("전력망·전기장비", "GRID"),
-             "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None), "POOL": ("소매", "XRT")}
+             "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None), "POOL": ("소매", "XRT"),
+             "MMM": ("기계·산업장비", None), "TT": ("기계·산업장비", None), "NFLX": ("미디어·엔터", None), "TTWO": ("미디어·엔터", None),
+             "EA": ("미디어·엔터", None), "CTAS": ("비즈니스 서비스", None), "KMB": ("화장품·생활용품", None), "CLX": ("화장품·생활용품", None),
+             "WDFC": ("화장품·생활용품", None), "DPZ": ("외식", "EATZ"), "ENTG": ("반도체", "SMH"), "NXT": ("태양광", "TAN"),
+             "PYPL": ("결제·카드", None), "GRMN": ("가전·가구", None), "BHP": ("금속·광업", "XME"), "CVS": ("헬스케어 서비스·보험", "IHF"),
+             "BRKR": ("의료기기", "IHI"), "ROG": ("IT 하드웨어", None), "IMAX": ("미디어·엔터", None)}
+TOBACCO = {"PM", "MO", "BTI", "RLX"}      # 나스닥 분류는 '약용 화학'이라 화학으로 나옴 → '담배'로
 
 
 SEMI_EQUIP = {"ASML", "AMAT", "LRCX", "KLAC", "ACLS", "ACMR", "AEIS", "ONTO", "KLIC", "COHU", "FORM", "UCTT", "ICHR", "NVMI", "CAMT",
@@ -170,12 +176,34 @@ SEMI_EQUIP = {"ASML", "AMAT", "LRCX", "KLAC", "ACLS", "ACMR", "AEIS", "ONTO", "K
 
 def fix_theme(tk, gics, industry, th):
     """나스닥 산업 분류가 GICS 업종과 확실히 어긋나는 대표 업종 고치기 (예: 의료기기 회사가 '기계·산업장비'로 나오는 경우)"""
+    if tk in TOBACCO:
+        return [("담배", None)]
     if not th or tk in THEME_FIX:
         return th
     nm = th[0][0]
     s = (industry or "").lower()
     new = None
-    if gics == "Health Care" and (nm in ("기계·산업장비", "IT 하드웨어", "통신장비", "전력망·전기장비")
+    pair = {("Information Technology", "기계·산업장비"): ("IT 하드웨어", None),        # 계측·자동인식 장비 (반도체 장비는 아래에서)
+            ("Financials", "비즈니스 서비스"): ("결제·카드", None),                     # FIS·GPN·CPAY 등 결제 처리
+            ("Financials", "소프트웨어"): ("핀테크", "ARKF"),                          # XYZ·TOST·JKHY 등
+            ("Financials", "헬스케어 서비스·보험"): ("보험", "KIE"),                    # AFL·UNM 등 생명·상해보험
+            ("Communication Services", "소프트웨어"): ("인터넷", "FDN"),               # GOOGL·META·RDDT 등
+            ("Communication Services", "레저·여행"): ("미디어·엔터", None),            # DIS·LYV·TKO 등
+            ("Consumer Discretionary", "항공우주·방산"): ("운송·물류", "IYT"),          # 공항 운영사
+            ("Consumer Discretionary", "통신장비"): ("우주", "UFO"),                   # ASTS·GSAT·IRDM 위성통신
+            ("Real Estate", "레저·여행"): ("리츠·부동산", None),                        # 호텔 리츠
+            ("Materials", "화장품·생활용품"): ("화학", None),                          # ECL 등
+            ("Industrials", "소비자금융·카드"): ("비즈니스 서비스", None),              # EFX·TRU 신용평가
+            ("Industrials", "가전·가구"): ("기계·산업장비", None),                     # EMR·OTIS·AOS
+            ("Consumer Discretionary", "기계·산업장비"): ("레저·여행", "PEJ"),         # BC·PII·DOO 보트·레저 차량
+            ("Materials", "기계·산업장비"): ("금속·광업", "XME")}                      # RS·KALU 금속 가공
+    if (gics, nm) in pair and not (gics == "Information Technology" and tk in SEMI_EQUIP):
+        new = pair[(gics, nm)]
+    elif gics == "Industrials" and nm == "화학" and "agricultural" in s:
+        new = ("농업", "MOO")
+    if new:
+        pass
+    elif gics == "Health Care" and (nm in ("기계·산업장비", "IT 하드웨어", "통신장비", "전력망·전기장비")
                                   or any(k in s for k in ("electromedical", "electrotherapeutic", "surgical", "x-ray", "dental"))):
         new = ("의료기기", "IHI")
     elif gics == "Information Technology" and nm == "기계·산업장비" and tk in SEMI_EQUIP:
