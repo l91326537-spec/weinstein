@@ -164,6 +164,37 @@ THEME_FIX = {"GE": ("항공우주·방산", "ITA"), "ETN": ("전력망·전기�
              "VRT": ("전력망·전기장비", "GRID"), "V": ("결제·카드", None), "MA": ("결제·카드", None), "POOL": ("소매", "XRT")}
 
 
+SEMI_EQUIP = {"ASML", "AMAT", "LRCX", "KLAC", "ACLS", "ACMR", "AEIS", "ONTO", "KLIC", "COHU", "FORM", "UCTT", "ICHR", "NVMI", "CAMT",
+              "VECO", "PLAB", "AMKR", "TER", "ENTG", "MKSI", "ASYS", "AXTI", "ATOM"}
+
+
+def fix_theme(tk, gics, industry, th):
+    """나스닥 산업 분류가 GICS 업종과 확실히 어긋나는 대표 업종 고치기 (예: 의료기기 회사가 '기계·산업장비'로 나오는 경우)"""
+    if not th or tk in THEME_FIX:
+        return th
+    nm = th[0][0]
+    s = (industry or "").lower()
+    new = None
+    if gics == "Health Care" and (nm in ("기계·산업장비", "IT 하드웨어", "통신장비", "전력망·전기장비")
+                                  or any(k in s for k in ("electromedical", "electrotherapeutic", "surgical", "x-ray", "dental"))):
+        new = ("의료기기", "IHI")
+    elif gics == "Information Technology" and nm == "기계·산업장비" and tk in SEMI_EQUIP:
+        new = ("반도체", "SMH")
+    elif gics == "Information Technology" and nm == "소비자금융·카드":
+        new = ("크립토", "BKCH")                     # 비트코인 채굴 회사
+    elif gics == "Consumer Discretionary" and nm in ("해운", "운송·물류"):
+        new = ("레저·여행", "PEJ")                   # 크루즈·여행 예약
+    elif gics == "Energy" and nm == "유틸리티":
+        new = ("석유·가스", "XOP")                   # 송유관(미드스트림)
+    elif gics == "Utilities" and nm == "석유·가스":
+        new = ("유틸리티", None)                     # 가스 공급 회사
+    elif gics == "Communication Services" and nm == "통신장비":
+        new = ("통신서비스", None)                   # 통신사
+    if new:
+        th = [new] + [x for x in th[1:] if x[0] != new[0]]
+    return th
+
+
 def sector_label(info):
     """앱에 보이는 업종 이름: my_tickers 업종 > 테마(나스닥 업종) > GICS 섹터"""
     th = info.get("themes") or []
@@ -500,7 +531,7 @@ def load_universe(quick=False):
     for tk, info in uni.items():
         mc, nm = ind.get(tk, (None, ""))
         info["mcap"], info["industry"] = mc, nm
-        info["themes"] = themes_for(tk, nm, mc)
+        info["themes"] = fix_theme(tk, info.get("sector"), nm, themes_for(tk, nm, mc))
     if not uni:
         sys.exit("종목 목록이 비어 있습니다. 인터넷 연결 또는 my_tickers.txt를 확인하세요.")
     print(f"총 {len(uni)}종목")
