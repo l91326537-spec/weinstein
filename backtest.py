@@ -1017,6 +1017,48 @@ def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
     return []
 
 
+def breakout_ext_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8):
+    """돌파 신호의 30주선 이격 감점 시안: 지금은 돌파면 이격과 관계없이 진입 위치 만점에 가까움 → 이격 10%+ 돌파 감점을 흔들기로 비교"""
+    sig0 = base_run[0]
+    ext = np.array([frames[t]["ext"].asof(d) if t in frames else np.nan for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+    brk = (sig0["signal"].values == "돌파")
+    nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+    hi = sig0["score"].values >= ms0
+    for lab, m in (("0~5%", (ext >= 0) & (ext < 5)), ("5~10%", (ext >= 5) & (ext < 10)), ("10~15%", (ext >= 10) & (ext < 15)),
+                   ("15~20%", (ext >= 15) & (ext < 20)), ("20%+", ext >= 20)):
+        a, b = stats_trades(sig0[brk & m & nd]), stats_trades(sig0[brk & m & nd & hi])
+        print(f"  [돌파 이격] 돌파 신호 · 30주선 +{lab}: 모든 신호 {a.get('n', 0)}건 승률 {f_(a.get('win'))}% 평균 {f_(a.get('avgR'))}R · "
+              f"{ms0}점+ {b.get('n', 0)}건 승률 {f_(b.get('win'))}% 평균 {f_(b.get('avgR'))}R")
+    sc = sig0["score"].values
+    pen1 = np.where(brk & (ext >= 10) & (ext < 15), 5, 0) + np.where(brk & (ext >= 15) & (ext < 20), 10, 0)
+    variants = [("지금", sig0), ("돌파 이격 10~15% -5 · 15~20% -10", sig0.assign(score=np.clip(sc - pen1, 0, 100))),
+                ("돌파 이격 10%+ -10", sig0.assign(score=np.clip(sc - np.where(brk & (ext >= 10) & (ext < 20), 10, 0), 0, 100))),
+                ("돌파 이격 12%+ 안 삼", sig0[~(brk & (ext >= 12))])]
+    rng = np.random.default_rng(47)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    res = {}
+    for nm, sg in variants:
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap)
+        c1 = stats_curve(e_["equity"])
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 200:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, fill=fill, max_small=msmall, caps=capmap, order="rk")
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        res[nm] = (c1, len(t_), cg, md)
+    base = res["지금"][2]
+    for nm, (c1, nt, cg, md) in res.items():
+        win = "" if nm == "지금" else f" · 지금보다 나은 횟수 {sum(1 for a, b in zip(cg, base) if a > b)}/{min(len(cg), len(base))}"
+        print(f"  [돌파 이격] {nm}: 한 번 연평균 {f_(c1.get('cagr'))}% · 최대낙폭 {f_(c1.get('mdd'))}% · 거래 {nt}건 | 흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% "
+              f"(하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%{win}")
+    return []
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -4026,9 +4068,9 @@ def main(argv=None, fetch=None, universe=None):
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
     try:
-        sector_tilt_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap, {t: v.get("sector") for t, v in uni.items()})
+        breakout_ext_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
     except Exception as ex:
-        print("  [업종 가감점] 비교 실패:", ex)
+        print("  [돌파 이격] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
