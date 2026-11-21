@@ -1017,6 +1017,157 @@ def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
     return []
 
 
+def time_stop(frames, sig, weeks, min_ret):
+    """시간 손절: 산 지 weeks주가 지난 주 금요일 종가가 매수가 +min_ret% 미만이면 그 종가에 매도 (원래 청산이 더 빠르면 그대로)"""
+    s2 = sig.copy()
+    for i, r in s2.iterrows():
+        f = frames.get(r["ticker"])
+        if f is None or r["entry_date"] not in f.index:
+            continue
+        j = f.index.get_loc(r["entry_date"]) + weeks
+        if j >= len(f):
+            continue
+        d = f.index[j]
+        if pd.notna(r["exit_date"]) and r["exit_date"] <= d:
+            continue
+        c = f["close"].iloc[j]
+        if c < r["entry"] * (1 + min_ret / 100):
+            risk = r["entry"] - r["stop0"]
+            s2.at[i, "exit_date"], s2.at[i, "exit"], s2.at[i, "why"] = d, c, "시간 손절"
+            s2.at[i, "R"] = (c - r["entry"]) / risk if risk > 0 else 0
+            s2.at[i, "ret"] = (c / r["entry"] - 1) * 100 - 2 * BT["cost_pct"]
+    return s2
+
+
+def sec_quarterly_growth(frames):
+    """SEC 분기 순이익(NetIncomeLoss, 달력 분기)으로 종목별 '쓸 수 있게 된 날짜 → 전년 같은 분기 대비 성장률' 표.
+       분기 끝 + 60일 뒤부터 쓴 것으로 봄 (10-Q 마감 40~45일 + 여유). 전년 분기가 적자·0이면 성장률 없음"""
+    import requests
+    ua = " ".join((os.environ.get("SEC_UA") or "").split())
+    if not ua:
+        print("  [실적 성장] SEC_UA가 없어 건너뜀"); return {}
+    H = {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
+    def get(url):
+        for k in range(3):
+            try:
+                r = requests.get(url, headers=H, timeout=30); time.sleep(0.15)
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status(); return r.json()
+            except Exception:
+                time.sleep(2)
+        return None
+    tk = get("https://www.sec.gov/files/company_tickers.json")
+    if not tk:
+        print("  [실적 성장] SEC 종목 목록 실패"); return {}
+    cik2t = {}
+    for v in tk.values():
+        t = str(v["ticker"]).upper().replace(".", "-")
+        if t in frames:
+            cik2t.setdefault(int(v["cik_str"]), t)
+    ni = {}   # ticker -> {(y, q): 순이익}
+    for y in range(2008, dt.date.today().year + 1):
+        for q in (1, 2, 3, 4):
+            js = get(f"https://data.sec.gov/api/xbrl/frames/us-gaap/NetIncomeLoss/USD/CY{y}Q{q}.json")
+            if not js:
+                continue
+            for row in js.get("data", []):
+                t = cik2t.get(int(row.get("cik", 0)))
+                if t:
+                    ni.setdefault(t, {})[(y, q)] = float(row["val"])
+    out = {}
+    for t, m in ni.items():
+        rows = []
+        for (y, q), v in sorted(m.items()):
+            pv = m.get((y - 1, q))
+            if pv is None:
+                g = np.nan
+            elif pv > 0:
+                g = (v / pv - 1) * 100
+            elif v > 0:
+                g = np.inf          # 적자 → 흑자 전환
+            else:
+                g = -np.inf if v < pv else np.nan   # 적자가 커지면 -무한, 줄면 판단 안 함
+            qend = pd.Timestamp(y, q * 3, 1) + pd.offsets.MonthEnd(0)
+            rows.append((qend + pd.Timedelta(days=60), g, v))
+        if rows:
+            out[t] = pd.DataFrame(rows, columns=["avail", "g", "ni"]).set_index("avail").sort_index()
+    print(f"  [실적 성장] 분기 순이익 받은 종목 {len(out)}개")
+    return out
+
+
+def beat_index_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8):
+    """지수를 이기기 위한 장치들을 흔들기 8번으로 비교: ① 종목·QQQ 비중 ② 실적 성장 가감점(SEC) ③ 추매(피라미딩) ④ 시간 손절"""
+    sig0 = base_run[0]
+    V = [("지금 (남는 돈 QQQ)", sig0, {}),
+         ("① QQQ 채우기 없음 (종목+현금)", sig0, dict(fill=None)),
+         ("① 종목 합계 50%까지 (나머지 QQQ)", sig0, dict(stk_cap=50)),
+         ("① 종목 합계 30%까지 (나머지 QQQ)", sig0, dict(stk_cap=30))]
+    try:
+        G = sec_quarterly_growth(frames)
+    except Exception as ex:
+        print("  [지수 이기기] 실적 받기 실패:", ex); G = {}
+    if G:
+        def look(t, d):
+            g = G.get(t)
+            if g is None:
+                return np.nan, np.nan
+            h = g[g.index <= d]
+            if not len(h):
+                return np.nan, np.nan
+            h = h.iloc[-3:]
+            g1 = h["g"].iloc[-1]
+            g0 = h["g"].iloc[-2] if len(h) > 1 else np.nan
+            return g1, g0
+        gg = np.array([look(t, d) for t, d in zip(sig0["ticker"], sig0["sig_date"])], dtype=float)
+        g1, g0 = gg[:, 0], gg[:, 1]
+        fast = g1 >= 25
+        accel = fast & (np.nan_to_num(g1, nan=-1e9) > np.nan_to_num(g0, nan=1e9))
+        bad = (g1 < 0)
+        hi = sig0["score"].values >= ms0
+        nd = ~sig0["dup"].values if "dup" in sig0 else np.ones(len(sig0), bool)
+        for lab, m in (("성장 25%+", fast), ("성장 25%+ & 빨라짐", accel), ("성장 0~25%", (g1 >= 0) & (g1 < 25)), ("역성장·적자 커짐", bad),
+                       ("데이터 없음", np.isnan(g1))):
+            a, b = stats_trades(sig0[m & nd]), stats_trades(sig0[m & nd & hi])
+            print(f"  [지수 이기기] 실적 {lab}: 모든 신호 {a.get('n', 0)}건 승률 {f_(a.get('win'))}% 평균 {f_(a.get('avgR'))}R · "
+                  f"{ms0}점+ {b.get('n', 0)}건 승률 {f_(b.get('win'))}% 평균 {f_(b.get('avgR'))}R")
+        sc = sig0["score"].values
+        V += [("② 실적 성장 25%+ +5", sig0.assign(score=np.clip(sc + np.where(fast, 5, 0), 0, 100)), {}),
+              ("② 역성장·적자 커짐 -5", sig0.assign(score=np.clip(sc - np.where(bad, 5, 0), 0, 100)), {}),
+              ("② 둘 다 (+5 / -5)", sig0.assign(score=np.clip(sc + np.where(fast, 5, 0) - np.where(bad, 5, 0), 0, 100)), {})]
+    a10, a30 = add_rows(frames, sig0, 10, True), add_rows(frames, sig0, 30, False)
+    if len(a10):
+        V.append(("③ 10주선 눌림 추매 (+5% 수익 중·위험 절반)", pd.concat([sig0, a10], ignore_index=True), {}))
+    if len(a30):
+        V.append(("③ 30주선 눌림 추매 (+5% 수익 중·위험 절반)", pd.concat([sig0, a30], ignore_index=True), {}))
+    for w, mr in ((12, 5), (16, 5), (26, 10)):
+        V.append((f"④ 시간 손절 {w}주 뒤 +{mr}% 미만이면 매도", time_stop(frames, sig0, w, mr), {}))
+    rng = np.random.default_rng(53)
+    plan = [(int(rng.integers(0, 53)), int(rng.integers(0, 1 << 30))) for _ in range(n)]
+    res = {}
+    for nm, sg, kw in V:
+        kw = dict(dict(fill=fill), **kw)
+        e_, t_ = run_portfolio(sg, frames, cal, ms0, max_pos=mp, max_small=msmall, caps=capmap, **kw)
+        c1 = stats_curve(e_["equity"])
+        cg, md, t0 = [], [], time.time()
+        for k, seed in plan:
+            if time.time() - t0 > 240:
+                break
+            r2 = np.random.default_rng(seed)
+            cal2 = cal[k:]
+            sg2 = sg[sg["entry_date"] >= cal2[0]]
+            sg2 = sg2.assign(score=np.clip(sg2["score"] + r2.uniform(-3, 3, len(sg2)), 0, 100), rk=r2.random(len(sg2)))
+            e2, _ = run_portfolio(sg2, frames, cal2, ms0, max_pos=mp, max_small=msmall, caps=capmap, order="rk", **kw)
+            c_ = stats_curve(e2["equity"]); cg.append(c_.get("cagr", np.nan)); md.append(c_.get("mdd", np.nan))
+        res[nm] = (c1, len(t_), cg, md, e_["stk"].mean(), e_["etf"].mean())
+    base = res[V[0][0]][2]
+    for nm, (c1, nt, cg, md, stk, etf) in res.items():
+        win = "" if nm == V[0][0] else f" · 지금보다 나은 횟수 {sum(1 for a, b in zip(cg, base) if a > b)}/{min(len(cg), len(base))}"
+        print(f"  [지수 이기기] {nm}: 한 번 연평균 {f_(c1.get('cagr'))}% · 최대낙폭 {f_(c1.get('mdd'))}% · 거래 {nt}건 · 평균 비중 종목 {stk:.0f}% + QQQ {etf:.0f}% | "
+              f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · "
+              f"낙폭 중앙값 {f_(np.nanmedian(md))}%{win}")
+
+
 def breakout_ext_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8):
     """돌파 신호의 30주선 이격 감점 시안: 지금은 돌파면 이격과 관계없이 진입 위치 만점에 가까움 → 이격 10%+ 돌파 감점을 흔들기로 비교"""
     sig0 = base_run[0]
@@ -4153,17 +4304,9 @@ def main(argv=None, fetch=None, universe=None):
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
     try:
-        inverse_study(dfs, cal, start)
+        beat_index_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
     except Exception as ex:
-        print("  [인버스] 비교 실패:", ex)
-    try:
-        breakout_ext_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
-    except Exception as ex:
-        print("  [돌파 이격] 비교 실패:", ex)
-    try:
-        value_weinstein_compare(VALUE_CURVES, runs[ib][1]["equity"])
-    except Exception as ex:
-        print("  [가치 vs 와인스테인] 비교 실패:", ex)
+        print("  [지수 이기기] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
