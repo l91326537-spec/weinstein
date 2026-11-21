@@ -1059,6 +1059,9 @@ def breakout_ext_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, n=8
     return []
 
 
+VALUE_CURVES = {}
+
+
 def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
     """가치투자 백테스트 (SEC 재무 데이터 · 2010년~). 매년 5월 첫 주에 지난해 재무로 골라 1년 보유, 같은 비중.
        시가총액 = 그해 6월 말 유통주식 시가(EntityPublicFloat) × 지금 주가/그때 주가 (분할 영향 없음).
@@ -1233,6 +1236,7 @@ def value_study(frames, dfs, uni, capmap, cal, n_hold=30):
         if b in dfs:
             s_ = dfs[b]["Close"].reindex(idx, method="ffill")
             out[f"{b} 그냥 보유"] = (s_ / s_.loc[e0] * 100)[idx >= e0]
+    VALUE_CURVES.clear(); VALUE_CURVES.update(out)
     spy = out.get("SPY 그냥 보유")
     rows = []
     for name, eq in out.items():
@@ -1585,6 +1589,87 @@ def sector_conc_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
         print(f"  [업종 집중] {nm}: 한 번 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 거래 {len(t_)}건 · 2008 {f_(r_['y08'])}% · 2022 {f_(r_['y22'])}% | "
               f"흔들기 {len(cg)}번 중앙값 {f_(np.nanmedian(cg))}% (하위 10% {f_(np.nanpercentile(cg, 10))}% · 상위 10% {f_(np.nanpercentile(cg, 90))}%) · 낙폭 중앙값 {f_(np.nanmedian(md))}%")
     return rows
+
+
+def inverse_study(dfs, cal, start):
+    """인버스(PSQ) 비교. PSQ 주간 수익 ≈ -QQQ 주간 수익(실제는 매일 리셋이라 횡보장에선 더 손해, 비용 연 0.95% 반영).
+       그냥 보유 / 4단계면 현금(지금) / 4단계면 PSQ 50%·100% / 반등 실패·4단계면 PSQ 100% → 주봉 종가 30주선 위면 QQQ 복귀.
+       이번 주 종가로 정하고 다음 주 수익부터 반영."""
+    flat = S.CFG["flat_pct"]
+    if "QQQ" not in dfs:
+        return
+    f = S.indicators(dfs["QQQ"])
+    stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+    f = f.reindex(cal, method="ffill"); stg = stg.reindex(cal, method="ffill")
+    o, h, c, ma, sl = f["open"].values, f["high"].values, f["close"].values, f["ma30"].values, f["slope"].values
+    st4 = (stg == 4).values
+    below = c < ma
+    fail = (sl <= flat) & np.r_[False, below[:-1]] & (h >= ma * 0.99) & below & (c < o)
+    ret = pd.Series(c, index=cal).pct_change().fillna(0).values
+    fee = 0.0095 / 52
+    def run(rule):
+        pos, eq, wk_inv = 1.0, [1.0], 0
+        for k in range(1, len(cal)):
+            r = pos * ret[k] if pos >= 0 else (-pos) * (-ret[k] - fee)
+            eq.append(eq[-1] * (1 + r))
+            if pos < 0:
+                wk_inv += 1
+            if rule == "hold":
+                pos = 1.0
+            elif rule == "cash":
+                pos = 0.0 if st4[k] else 1.0
+            elif rule in ("p50", "p100"):
+                pos = (-0.5 if rule == "p50" else -1.0) if st4[k] else 1.0
+            elif rule in ("fail", "fail50"):
+                inv = -1.0 if rule == "fail" else -0.5
+                if st4[k] or fail[k]:
+                    pos = inv
+                elif not below[k]:
+                    pos = 1.0
+        e = pd.Series(eq, index=cal) * 100
+        return e[e.index >= pd.Timestamp(start)], wk_inv
+    for nm, rule in (("그냥 보유", "hold"), ("4단계면 현금 (지금)", "cash"), ("4단계면 PSQ 50%", "p50"),
+                     ("4단계면 PSQ 100%", "p100"), ("반등 실패·4단계면 PSQ 50% (30주선 위 복귀)", "fail50"),
+                     ("반등 실패·4단계면 PSQ 100% (30주선 위 복귀)", "fail")):
+        e, wi = run(rule)
+        r_ = curve_row(f"[인버스] QQQ · {nm}", f"인버스 보유 {wi}주", e)
+        y20 = (e.resample("YE").last().pct_change() * 100).get(pd.Timestamp("2020-12-31"), np.nan)
+        print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · ~2015 {f_(r_['a'].get('cagr'))}% · 2016~ {f_(r_['b'].get('cagr'))}% · "
+              f"2008 {f_(r_['y08'])}% · 2020 {f_(y20)}% · 2022 {f_(r_['y22'])}% · 최악의 해 {f_(r_['worst'])}% · {r_['desc']}")
+
+
+def value_weinstein_compare(curves, w_eq):
+    """같은 기간(가치 첫 리밸런스~) 와인스테인 시스템 vs 가치 전략, 그리고 50:50 섞기(4주마다 리밸런스)."""
+    if not curves:
+        print("  [가치 vs 와인스테인] 가치 곡선 없음 (SEC 데이터 실패?)")
+        return
+    t0 = min(e.dropna().index[0] for e in curves.values())
+    w = w_eq.dropna(); w = w[w.index >= t0]
+    def show(nm, e):
+        e = e.dropna()
+        a = stats_curve(e)
+        b = stats_curve(e[e.index >= pd.Timestamp("2018-05-01")])
+        print(f"  [가치 vs 와인스테인] {nm}: 연평균 {f_(a.get('cagr'))}% · 최대낙폭 {f_(a.get('mdd'))}% · 2018~ {f_(b.get('cagr'))}% "
+              f"(낙폭 {f_(b.get('mdd'))}%) · 기간 {e.index[0].date()}~{e.index[-1].date()}")
+    show("와인스테인 시스템", w)
+    for nm, e in curves.items():
+        e2 = e.reindex(w.index, method="ffill").dropna()
+        show(nm, e2)
+        if "그냥 보유" in nm:
+            continue
+        df = pd.concat([w, e2], axis=1).dropna()
+        df.columns = ["w", "v"]
+        r = df.pct_change().fillna(0).values
+        ww, out = np.array([0.5, 0.5]), []
+        for k in range(len(r)):
+            ww = ww * (1 + r[k])
+            out.append(ww.sum())
+            if k % 4 == 3:
+                ww = np.full(2, ww.sum() / 2)
+        show(f"50:50 와인스테인 + {nm}", pd.Series(out, index=df.index) * 100)
+    cr = pd.concat([w.pct_change()] + [curves[n].reindex(w.index, method="ffill").pct_change().rename(n) for n in curves], axis=1).dropna()
+    if len(cr.columns) > 1:
+        print("  [가치 vs 와인스테인] 주간 수익 상관계수: " + " · ".join(f"{n} {cr.iloc[:, 0].corr(cr[n]):.2f}" for n in cr.columns[1:]))
 
 
 def index_exit_study(dfs, cal, start):
@@ -4068,9 +4153,17 @@ def main(argv=None, fetch=None, universe=None):
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
     try:
+        inverse_study(dfs, cal, start)
+    except Exception as ex:
+        print("  [인버스] 비교 실패:", ex)
+    try:
         breakout_ext_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
     except Exception as ex:
         print("  [돌파 이격] 비교 실패:", ex)
+    try:
+        value_weinstein_compare(VALUE_CURVES, runs[ib][1]["equity"])
+    except Exception as ex:
+        print("  [가치 vs 와인스테인] 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
