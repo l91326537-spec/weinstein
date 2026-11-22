@@ -1017,6 +1017,73 @@ def sector_tilt_study(frames, cal, base_run, ms0, mp, fill, msmall, capmap, secm
     return []
 
 
+def _cash_mix(ret, rf, stg, base, w3, w4=0.0):
+    """지난주 단계(stg, 이미 한 주 미룸)로 지수 비중을 정하고 나머지는 현금(이자 rf, 주간). base=평소 지수 비중, w3=3단계 비중, w4=4단계 비중"""
+    w = np.where(stg == 4, w4, np.where(stg == 3, w3, base))
+    return np.cumprod(1 + w * ret + (1 - w) * rf), w
+
+
+CASH_RULES = (("그냥 100% 보유", 1.0, 1.0, 1.0), ("4단계면 현금 (지금 규칙)", 1.0, 1.0, 0.0),
+              ("현금 10% 고정 + 4단계 현금", 0.9, 0.9, 0.0), ("현금 20% 고정 + 4단계 현금", 0.8, 0.8, 0.0),
+              ("현금 30% 고정 + 4단계 현금", 0.7, 0.7, 0.0), ("3단계면 절반 + 4단계 현금", 1.0, 0.5, 0.0),
+              ("현금 20% + 3단계면 절반(40%) + 4단계 현금", 0.8, 0.4, 0.0), ("3·4단계면 현금", 1.0, 0.0, 0.0))
+
+
+def cash_study(dfs, cal, start):
+    """현금 비중 비교 (지수만): 고정 현금 10·20·30%, 3단계면 절반 등. 현금 이자는 미국 3개월 국채(^IRX) 실제 금리,
+       못 받으면 연 3%. 지난주 금요일 종가의 단계로 이번 주 비중을 정함(매주 맞춤, 수수료 무시)"""
+    dd = daily_close(["^IRX"], (pd.Timestamp(start) - pd.Timedelta(days=400)).date().isoformat())
+    irx = dd.get("^IRX")
+    for tk in ("QQQ", "SPY"):
+        if tk not in dfs:
+            continue
+        f = S.indicators(dfs[tk])
+        stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1)
+        f = f.reindex(cal, method="ffill"); stg = stg.reindex(cal, method="ffill").shift(1).values
+        c = f["close"].values
+        ret = np.r_[0, c[1:] / c[:-1] - 1]
+        if irx is not None and len(irx):
+            rf = (weekly_of(irx, cal).ffill().bfill().values / 100) / 52
+            note = "현금 이자 = 3개월 국채 실제 금리"
+        else:
+            rf = np.full(len(cal), 0.03 / 52); note = "현금 이자 연 3%"
+        rf = np.r_[0, rf[:-1]]
+        print(f"  [현금 비중] {tk} · {note} · 기간 {cal[0].date()}~{cal[-1].date()}")
+        for nm, b, w3, w4 in CASH_RULES:
+            eq, w = _cash_mix(ret, rf, stg, b, w3, w4)
+            e = pd.Series(eq * 100, index=cal)
+            r_ = curve_row(f"[현금 비중] {tk} · {nm}", "", e)
+            y = e.resample("YE").last().pct_change() * 100
+            y20 = y.get(pd.Timestamp("2020-12-31"), np.nan)
+            cur = (e.iloc[-1] / e.max() - 1) * 100
+            print(f"  {r_['name']}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 2008 {f_(r_['y08'])}% · 2020 {f_(y20)}% · "
+                  f"2022 {f_(r_['y22'])}% · 최악의 해 {f_(r_['worst'])}% · 지금 고점 대비 {f_(cur)}% · 평균 지수 비중 {np.nanmean(w) * 100:.0f}% · 지금 비중 {w[-1] * 100:.0f}%")
+    # 긴 기간 (S&P500 1928~ · 나스닥 1971~, 현금 이자 연 3% 고정 · 배당 제외)
+    try:
+        import yfinance as yf
+        for tk, nm, st0 in (("^GSPC", "S&P500", "1927-12-01"), ("^IXIC", "나스닥", "1971-02-01")):
+            d = yf.download(tk, start=st0, interval="1wk", auto_adjust=False, progress=False)
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.get_level_values(0)
+            d = d[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+            if len(d) < 200:
+                continue
+            f = S.indicators(d)
+            stg = f.apply(lambda r: (S.classify(r) or (None,))[0], axis=1).shift(1).values
+            c = f["close"].values
+            ret = np.r_[0, c[1:] / c[:-1] - 1]
+            rf = np.full(len(c), 0.03 / 52)
+            for nm2, b, w3, w4 in CASH_RULES:
+                eq, w = _cash_mix(ret, rf, stg, b, w3, w4)
+                e = pd.Series(eq, index=f.index); e = e[e.index >= f.index[60]]
+                st = stats_curve(e)
+                y = (e.resample("YE").last().pct_change() * 100).iloc[1:]
+                print(f"  [현금 비중] {nm} {e.index[0].year}~ · {nm2}: 연평균 {f_(st.get('cagr'))}% · 최대낙폭 {f_(st.get('mdd'))}% · 최악의 해 {f_(y.min())}% · "
+                      f"마이너스 해 {int((y < 0).sum())}/{len(y)} (현금 이자 연 3%·배당 제외)")
+    except Exception as ex:
+        print("  [현금 비중] 긴 기간 실패:", ex)
+
+
 def time_stop(frames, sig, weeks, min_ret):
     """시간 손절: 산 지 weeks주가 지난 주 금요일 종가가 매수가 +min_ret% 미만이면 그 종가에 매도 (원래 청산이 더 빠르면 그대로)"""
     s2 = sig.copy()
@@ -4304,9 +4371,18 @@ def main(argv=None, fetch=None, universe=None):
     except Exception as ex:
         print("  [공포 바구니] 비교 실패:", ex)
     try:
-        beat_index_study(frames, cal, runs[ib], args.min_score, mp_i, fill_i, ms_i, capmap)
+        cash_study(dfs, cal, start)
     except Exception as ex:
-        print("  [지수 이기기] 비교 실패:", ex)
+        print("  [현금 비중] 비교 실패:", ex)
+    try:
+        if fill_i:
+            for nm, fl in (("지금 (남는 돈 QQQ, 4단계 현금)", fill_i), ("시장 3단계면 QQQ 절반", dict(fill_i, half3=True))):
+                e_, t_ = run_portfolio(runs[ib][0], frames, cal, args.min_score, max_pos=mp_i, fill=fl, max_small=ms_i, caps=capmap)
+                r_ = curve_row(nm, "", e_["equity"])
+                print(f"  [현금 비중] 전략 · {nm}: 연평균 {f_(r_['c'].get('cagr'))}% · 최대낙폭 {f_(r_['c'].get('mdd'))}% · 2008 {f_(r_['y08'])}% · "
+                      f"2022 {f_(r_['y22'])}% · 최악의 해 {f_(r_['worst'])}% · 평균 비중 종목 {e_['stk'].mean():.0f}% + QQQ {e_['etf'].mean():.0f}% (현금 이자 0)")
+    except Exception as ex:
+        print("  [현금 비중] 전략 비교 실패:", ex)
     try:
         macro_study(dfs, cal, market, runs[ib], args.min_score)
     except Exception as ex:
